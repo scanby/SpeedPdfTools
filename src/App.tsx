@@ -13,6 +13,11 @@ import {
   convertMixedBatchToSinglePdf,
 } from './core/batchPdfEngine';
 import { decryptVaultLocal, encryptBlobLocal } from './core/cryptoVault';
+import {
+  DesktopLaunchPayload,
+  desktopResultToFile,
+  getDesktopBridge,
+} from './core/desktopBridge';
 import { docxToPdf, pdfToDocx } from './core/docxBridge';
 import { formatBytes, stripExtension, triggerSequentialDownloads } from './core/formatters';
 import {
@@ -707,6 +712,79 @@ export default function App() {
       };
     });
   };
+
+  const desktopHandlerRef = useRef<(payload: DesktopLaunchPayload) => Promise<void>>(async () => {});
+  desktopHandlerRef.current = async (payload: DesktopLaunchPayload) => {
+    const bridge = getDesktopBridge();
+    if (!bridge || payload.files.length === 0) return;
+
+    const rawItems = await bridge.readFiles(payload.files);
+    const files = rawItems.map(desktopResultToFile);
+    if (files.length === 0) return;
+
+    let targetTool: PdfToolId = 'compress';
+    let autoRun = payload.autoConvert && !payload.customUi;
+    let batchOverride: BatchConvertMode | undefined;
+
+    if (payload.mode === 'batch-single-pdf') {
+      targetTool = 'batch-to-pdf';
+      batchOverride = 'single-pdf';
+      setBatchConvertMode('single-pdf');
+      autoRun = true;
+    } else if (payload.mode === 'batch-separate-pdfs') {
+      targetTool = 'batch-to-pdf';
+      batchOverride = 'separate-pdfs';
+      setBatchConvertMode('separate-pdfs');
+      autoRun = true;
+    } else if (payload.mode === 'merge') {
+      targetTool = 'merge';
+      autoRun = true;
+    } else if (payload.autoConvert && payload.format === 'docx') {
+      targetTool = 'pdf-to-word';
+      autoRun = true;
+    } else if (payload.autoConvert && payload.format === 'pdf') {
+      const hasMixed = files.length > 1 && new Set(files.map(detectFileKind)).size > 1;
+      const firstKind = detectFileKind(files[0]);
+      targetTool = hasMixed
+        ? 'batch-to-pdf'
+        : firstKind === 'docx'
+        ? 'word-to-pdf'
+        : 'img-to-pdf';
+      autoRun = true;
+    } else {
+      targetTool = 'compress';
+      autoRun = false;
+    }
+
+    handleSelectTool(targetTool);
+    const items = await addFilesToQueue(files, true);
+
+    if (!autoRun) {
+      setContextBanner(
+        `Archivo(s) cargados desde Explorador de Windows (${payload.sourceDir}) para personalizar ajustes.`
+      );
+      return;
+    }
+
+    const created = await executeToolWithItems(targetTool, items, batchOverride);
+    if (created.length > 0) {
+      const savedPaths: string[] = [];
+      for (const out of created) {
+        const bytes = new Uint8Array(await out.blob.arrayBuffer());
+        const savedPath = await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+        savedPaths.push(savedPath);
+      }
+      setContextBanner(`Guardado automáticamente en ${payload.sourceDir}: ${savedPaths.join(', ')}`);
+    }
+  };
+
+  useEffect(() => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    return bridge.onShellLaunchArgs((payload) => {
+      void desktopHandlerRef.current(payload);
+    });
+  }, []);
 
   const currentMeta = TOOL_METADATA[activeTool];
   const totalQueueBytes = useMemo(() => queue.reduce((sum, q) => sum + q.size, 0), [queue]);

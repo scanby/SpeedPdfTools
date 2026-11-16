@@ -50,6 +50,20 @@ npm run lint
 npm run build
 ```
 
+## Compilar instalador de escritorio Windows 7–11 (.exe)
+
+El directorio `desktop/` contiene el empaquetado con **Electron 22 LTS** y **electron-builder** (NSIS `.exe` + Portable `.exe`) con registro automático del menú contextual en Explorador de Windows:
+
+```powershell
+$env:ELECTRON_BUILD="true"
+npm run build
+Copy-Item -Recurse -Force dist desktop/renderer
+npm --prefix desktop install
+npm --prefix desktop run dist:win
+```
+
+Los ejecutables generados quedan en `release-assets/` y también se compilan automáticamente en GitHub Actions (`.github/workflows/release.yml`) al publicar un tag `v*.*.*` para descargarse desde **GitHub → Releases → Assets**.
+
 ## Repositorio remoto
 
 Configurado para [`https://github.com/scanby/Speed-pdf.git`](https://github.com/scanby/Speed-pdf.git).

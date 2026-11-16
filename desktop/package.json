@@ -1,0 +1,57 @@
+{
+  "name": "speed-pdf-desktop",
+  "version": "0.1.0",
+  "description": "Empaquetado de escritorio Windows 7-11 para SPEED.PDF",
+  "main": "main.cjs",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^22.3.27",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.speedpdf.desktop",
+    "productName": "SPEED.PDF",
+    "directories": {
+      "output": "../release-assets",
+      "buildResources": "resources"
+    },
+    "files": [
+      "main.cjs",
+      "preload.cjs",
+      "renderer/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "include": "installer.nsh",
+      "artifactName": "SPEED.PDF-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "SPEED.PDF-Portable-${version}.${ext}"
+    }
+  }
+}
