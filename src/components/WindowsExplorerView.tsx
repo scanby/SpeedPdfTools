@@ -1,4 +1,5 @@
 import {
+  CheckCircle2,
   CheckSquare,
   ChevronRight,
   Download,
@@ -6,6 +7,7 @@ import {
   FileImage,
   FileText,
   Folder,
+  FolderOpen,
   Layers,
   Minimize2,
   MousePointerClick,
@@ -20,7 +22,7 @@ import {
   generateShellDispatcherScript,
   generateUninstallRegistryScript,
 } from '../core/windowsShell';
-import { ExplorerSimFile, WindowsTargetVersion } from '../types/speedpdf';
+import { ExplorerSimFile, ProgressState, WindowsTargetVersion } from '../types/speedpdf';
 
 export type ContextMenuActionType =
   | 'auto-to-pdf'
@@ -28,12 +30,27 @@ export type ContextMenuActionType =
   | 'custom-compress'
   | 'merge-selected'
   | 'merge-images'
+  | 'convert-all-single-pdf'
+  | 'convert-all-separate-pdfs'
   | 'auto-to-word'
   | 'auto-to-jpg'
   | 'open-custom';
 
+interface DirectoryHandleLike {
+  name: string;
+  values?: () => AsyncIterable<unknown>;
+  getFileHandle: (name: string, opts?: { create?: boolean }) => Promise<{
+    createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+  }>;
+}
+
 interface WindowsExplorerViewProps {
-  onExecuteContextAction: (action: ContextMenuActionType, files: ExplorerSimFile[]) => void;
+  progress: ProgressState;
+  onExecuteContextAction: (
+    action: ContextMenuActionType,
+    files: ExplorerSimFile[],
+    linkedDirectory?: DirectoryHandleLike | null
+  ) => Promise<ExplorerSimFile[]>;
 }
 
 const INITIAL_SIM_FILES: ExplorerSimFile[] = [
@@ -74,11 +91,21 @@ const INITIAL_SIM_FILES: ExplorerSimFile[] = [
   },
 ];
 
-export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerViewProps) {
+export function WindowsExplorerView({
+  progress,
+  onExecuteContextAction,
+}: WindowsExplorerViewProps) {
   const [windowsVersion, setWindowsVersion] = useState<WindowsTargetVersion>('win11');
   const [simFiles, setSimFiles] = useState<ExplorerSimFile[]>(INITIAL_SIM_FILES);
   const [selectedIds, setSelectedIds] = useState<string[]>(['sim-1']);
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [linkedDirHandle, setLinkedDirHandle] = useState<DirectoryHandleLike | null>(null);
+  const [folderPathLabel, setFolderPathLabel] = useState('C:\\Users\\Documentos\\Contratos_2026');
+  const [autoSaveBanner, setAutoSaveBanner] = useState<{
+    message: string;
+    files: ExplorerSimFile[];
+  } | null>(null);
+  const [folderWarning, setFolderWarning] = useState<string | null>(null);
 
   // Registry Configurator State
   const [installPath, setInstallPath] = useState('C:\\Program Files\\SPEED.PDF\\speedpdf.exe');
@@ -157,6 +184,83 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
     if (added.length > 0) {
       setSimFiles((prev) => [...added, ...prev]);
       setSelectedIds(added.map((a) => a.id));
+    }
+  };
+
+  const handleLinkRealFolder = async () => {
+    setFolderWarning(null);
+    const picker = (window as unknown as { showDirectoryPicker?: (opts?: { mode?: string }) => Promise<DirectoryHandleLike> })
+      .showDirectoryPicker;
+    if (!picker) {
+      setFolderWarning(
+        'Tu navegador actual no soporta escritura directa por carpeta; al convertir con clic derecho se descargará automáticamente en tu carpeta de Descargas.'
+      );
+      return;
+    }
+
+    try {
+      const handle = await picker({ mode: 'readwrite' });
+      setLinkedDirHandle(handle);
+      setFolderPathLabel(`Carpeta local: ${handle.name}`);
+
+      if (handle.values) {
+        const loaded: ExplorerSimFile[] = [];
+        for await (const entry of handle.values() as AsyncIterable<{
+          kind: string;
+          name: string;
+          getFile: () => Promise<File>;
+        }>) {
+          if (entry.kind !== 'file') continue;
+          const lower = entry.name.toLowerCase();
+          const ext: ExplorerSimFile['extension'] | null = lower.endsWith('.pdf')
+            ? 'pdf'
+            : lower.endsWith('.docx')
+            ? 'docx'
+            : lower.endsWith('.png')
+            ? 'png'
+            : lower.endsWith('.jpg') || lower.endsWith('.jpeg')
+            ? 'jpg'
+            : null;
+          if (!ext) continue;
+          const file = await entry.getFile();
+          loaded.push({
+            id: `dir-${crypto.randomUUID()}`,
+            name: file.name,
+            extension: ext,
+            size: file.size,
+            modified: new Date(file.lastModified).toLocaleDateString('es-ES'),
+            realFile: file,
+          });
+        }
+        if (loaded.length > 0) {
+          setSimFiles(loaded);
+          setSelectedIds([loaded[0].id]);
+        }
+      }
+    } catch {
+      setFolderWarning(
+        'En la vista previa embebida el navegador restringe el acceso directo al disco; las conversiones con clic derecho se descargarán automáticamente.'
+      );
+    }
+  };
+
+  const handleMenuActionClick = async (actionId: ContextMenuActionType) => {
+    setMenuPos(null);
+    setAutoSaveBanner(null);
+    const created = await onExecuteContextAction(actionId, selectedFiles, linkedDirHandle);
+    if (created.length > 0) {
+      setSimFiles((prev) => {
+        const createdNames = new Set(created.map((c) => c.name));
+        const filtered = prev.filter((item) => !createdNames.has(item.name));
+        return [...created, ...filtered];
+      });
+      setSelectedIds(created.map((c) => c.id));
+      setAutoSaveBanner({
+        message: linkedDirHandle
+          ? `Guardado automáticamente en la carpeta origen (${folderPathLabel})`
+          : `Descargado automáticamente y añadido a ${folderPathLabel}`,
+        files: created,
+      });
     }
   };
 
@@ -257,10 +361,15 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
       } else if (allImg) {
         actions.push(
           {
-            id: 'merge-images',
-            label: `SPEED.PDF: Convertir ${count} imágenes a PDF`,
+            id: 'convert-all-single-pdf',
+            label: `SPEED.PDF: Convertir ${count} imágenes en un solo PDF`,
             icon: Layers,
             highlight: true,
+          },
+          {
+            id: 'convert-all-separate-pdfs',
+            label: 'SPEED.PDF: Convertir cada archivo en un PDF por separado',
+            icon: FileText,
           },
           {
             id: 'open-custom',
@@ -269,12 +378,25 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
           }
         );
       } else {
-        actions.push({
-          id: 'open-custom',
-          label: `SPEED.PDF: Abrir ${count} archivos en estación`,
-          icon: SlidersHorizontal,
-          highlight: true,
-        });
+        actions.push(
+          {
+            id: 'convert-all-single-pdf',
+            label: 'SPEED.PDF: Convertir todos en un solo PDF',
+            icon: Layers,
+            highlight: true,
+          },
+          {
+            id: 'convert-all-separate-pdfs',
+            label: 'SPEED.PDF: Convertir cada archivo en un PDF por separado',
+            icon: FileText,
+            highlight: true,
+          },
+          {
+            id: 'open-custom',
+            label: `SPEED.PDF: Abrir lote (${count} archivos) en estación`,
+            icon: SlidersHorizontal,
+          }
+        );
       }
     }
 
@@ -331,12 +453,29 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
             <Folder className="w-4 h-4 text-amber-500 shrink-0" />
             <span className="font-medium">{winFrameTitle}</span>
             <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-            <span className="font-mono text-slate-500 dark:text-slate-400">
-              C:\Users\Documentos\Contratos_2026
-            </span>
+            <span className="font-mono text-slate-500 dark:text-slate-400">{folderPathLabel}</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                void handleLinkRealFolder();
+              }}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              <span>{linkedDirHandle ? 'Cambiar carpeta local' : 'Vincular carpeta local'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSelectedIds(['sim-1', 'sim-3', 'sim-4'])}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0"
+            >
+              <span>Seleccionar formatos mixtos (3)</span>
+            </button>
+
             <label className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 cursor-pointer whitespace-nowrap shrink-0">
               <span>Agregar archivo propio</span>
               <input
@@ -358,6 +497,48 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
             </button>
           </div>
         </div>
+
+        {progress.active && (
+          <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-blue-50/60 dark:bg-blue-950/30 space-y-1.5">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-medium text-slate-800 dark:text-slate-200">{progress.stage}</span>
+              <span className="font-mono tabular-nums text-slate-600 dark:text-slate-400">
+                {progress.percent}%
+              </span>
+            </div>
+            <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-blue-600 transition-transform duration-150 origin-left"
+                style={{ transform: `scaleX(${Math.max(0.03, progress.percent / 100)})` }}
+              />
+            </div>
+          </div>
+        )}
+
+        {folderWarning && (
+          <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 bg-amber-50/70 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200">
+            {folderWarning}
+          </div>
+        )}
+
+        {autoSaveBanner && (
+          <div className="px-4 py-3 border-b border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 flex flex-wrap items-center justify-between gap-3 text-xs text-emerald-900 dark:text-emerald-200">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span>
+                <strong>{autoSaveBanner.message}:</strong>{' '}
+                {autoSaveBanner.files.map((f) => f.name).join(', ')}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoSaveBanner(null)}
+              className="underline font-medium shrink-0"
+            >
+              Ocultar
+            </button>
+          </div>
+        )}
 
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
@@ -405,6 +586,11 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
                           <FileText className="w-4 h-4 text-slate-500 dark:text-slate-400 shrink-0" />
                         )}
                         <span className="truncate">{file.name}</span>
+                        {file.isGeneratedOutput && (
+                          <span className="text-xs font-normal text-emerald-600 dark:text-emerald-400 shrink-0">
+                            · Generado aquí
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="py-2.5 px-3 text-xs text-slate-500 dark:text-slate-400 tabular-nums">
@@ -459,8 +645,7 @@ export function WindowsExplorerView({ onExecuteContextAction }: WindowsExplorerV
                 type="button"
                 role="menuitem"
                 onClick={() => {
-                  setMenuPos(null);
-                  onExecuteContextAction(opt.id, selectedFiles);
+                  void handleMenuActionClick(opt.id);
                 }}
                 className={`w-full text-left px-3 py-2 text-xs flex items-center gap-2.5 transition-colors ${
                   opt.highlight

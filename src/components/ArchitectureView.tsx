@@ -1,4 +1,5 @@
 import { Cpu, HardDrive, Layers, ShieldCheck } from 'lucide-react';
+import { UpdateCheckerPanel } from './UpdateCheckerPanel';
 
 const COMPATIBILITY_ROWS = [
   {
@@ -59,6 +60,8 @@ export function ArchitectureView() {
           Diseño de ingeniería orientado a mantenibilidad, compatibilidad desde Windows 7 hasta Windows 11 y procesamiento local cifrado sin dependencias en la nube.
         </p>
       </div>
+
+      <UpdateCheckerPanel />
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 p-4 space-y-2">

@@ -37,7 +37,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
         `"MultiSelectModel"="Player"`,
         '',
         `[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\${ext}\\shell\\SpeedPdfAutoConvert\\command]`,
-        `@="\\"${exe}\\" --auto-convert --format=pdf --input=\\"%1\\""`,
+        `@="\\"${exe}\\" --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
         ''
       );
     }
@@ -64,7 +64,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       `"MultiSelectModel"="Player"`,
       '',
       `[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMerge\\command]`,
-      `@="\\"${exe}\\" --mode=merge --ipc-batch --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --mode=merge --ipc-batch --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }
@@ -76,7 +76,29 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       `"Icon"="${exe},0"`,
       '',
       `[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfToWord\\command]`,
-      `@="\\"${exe}\\" --auto-convert --format=docx --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --auto-convert --format=docx --output-dir=source --input=\\"%1\\""`,
+      ''
+    );
+  }
+
+  if (config.enableAutoConvert || config.enableMergeSelected) {
+    lines.push(
+      '; Opciones globales para seleccion multiple de archivos de distinto formato',
+      `[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSingle]`,
+      `@="SPEED.PDF: Convertir todos en un solo PDF"`,
+      `"Icon"="${exe},0"`,
+      `"MultiSelectModel"="Player"`,
+      '',
+      `[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSingle\\command]`,
+      `@="\\"${exe}\\" --mode=batch-single-pdf --ipc-batch --output-dir=source --input=\\"%1\\""`,
+      '',
+      `[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSeparate]`,
+      `@="SPEED.PDF: Convertir cada archivo en un PDF por separado"`,
+      `"Icon"="${exe},0"`,
+      `"MultiSelectModel"="Player"`,
+      '',
+      `[HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSeparate\\command]`,
+      `@="\\"${exe}\\" --mode=batch-separate-pdfs --ipc-batch --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }
@@ -102,6 +124,8 @@ export function generateUninstallRegistryScript(): string {
     '[-HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfCompressCustom]',
     '[-HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMerge]',
     '[-HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfToWord]',
+    '[-HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSingle]',
+    '[-HKEY_CURRENT_USER\\Software\\Classes\\*\\shell\\SpeedPdfBatchSeparate]',
   ];
 
   return [
@@ -122,16 +146,25 @@ export function generateShellDispatcherScript(): string {
 param(
   [string]$Mode = "compress",
   [string]$Format = "pdf",
+  [string]$OutputDir = "source",
   [switch]$AutoConvert,
   [switch]$CustomUI,
   [Parameter(ValueFromRemainingArguments=$true)]
   [string[]]$InputFiles
 )
 
+# Resuelve automáticamente la carpeta del archivo original cuando OutputDir = "source"
+$ResolvedOutputDir = if ($OutputDir -eq "source" -and $InputFiles.Count -gt 0) {
+  Split-Path -Parent $InputFiles[0]
+} else {
+  $OutputDir
+}
+
 $PipeName = "SpeedPdfSingleInstancePipe"
 $Payload = @{
   mode = $Mode
   format = $Format
+  outputDir = $ResolvedOutputDir
   autoConvert = [bool]$AutoConvert
   customUi = [bool]$CustomUI
   files = $InputFiles
@@ -146,9 +179,9 @@ try {
   $Writer.Flush()
   $Pipe.Close()
 } catch {
-  # Si SPEED.PDF no está en memoria, inicia una única instancia ligera en segundo plano
+  # Si SPEED.PDF no está en memoria, inicia una única instancia ligera y guarda en $ResolvedOutputDir
   $ExePath = Join-Path $PSScriptRoot "speedpdf.exe"
-  Write-Host "Iniciando SPEED.PDF en modo local para: $($InputFiles -join ', ')"
+  Write-Host "Iniciando SPEED.PDF en modo local. Salida automática en: $ResolvedOutputDir"
 }
 `;
 }

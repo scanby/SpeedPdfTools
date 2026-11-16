@@ -1,14 +1,17 @@
 import {
   FileArchive,
   FileImage,
+  Files,
   FileText,
   Images,
   Layers,
   Lock,
   Minimize2,
   Moon,
+  RefreshCw,
   Sun,
 } from 'lucide-react';
+import { CURRENT_APP_VERSION } from '../core/updater';
 import { PdfToolId } from '../types/speedpdf';
 
 interface WorkspaceSidebarProps {
@@ -16,6 +19,7 @@ interface WorkspaceSidebarProps {
   onSelectTool: (tool: PdfToolId) => void;
   theme: 'dark' | 'light';
   onSetTheme: (theme: 'dark' | 'light') => void;
+  onOpenUpdates: () => void;
 }
 
 interface ToolNavGroup {
@@ -49,6 +53,12 @@ const TOOL_GROUPS: ToolNavGroup[] = [
   {
     groupLabel: 'Convertir formatos',
     items: [
+      {
+        id: 'batch-to-pdf',
+        label: 'Lote mixto a PDF',
+        subtitle: 'Varios formatos a la vez',
+        icon: Files,
+      },
       {
         id: 'pdf-to-img',
         label: 'PDF a JPG / PNG',
@@ -93,6 +103,7 @@ export function WorkspaceSidebar({
   onSelectTool,
   theme,
   onSetTheme,
+  onOpenUpdates,
 }: WorkspaceSidebarProps) {
   return (
     <aside className="w-full lg:w-[264px] shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/40 p-4 flex flex-col justify-between gap-6">
@@ -170,6 +181,20 @@ export function WorkspaceSidebar({
             </button>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={onOpenUpdates}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors"
+        >
+          <span className="inline-flex items-center gap-2">
+            <RefreshCw className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+            <span>Buscar actualizaciones</span>
+          </span>
+          <span className="font-mono text-slate-500 dark:text-slate-400 tabular-nums">
+            v{CURRENT_APP_VERSION}
+          </span>
+        </button>
 
         <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
           Procesamiento 100% local en tu dispositivo. Ningún documento sale de tu equipo.

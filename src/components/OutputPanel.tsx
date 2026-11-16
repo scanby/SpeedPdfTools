@@ -1,4 +1,5 @@
-import { CheckCircle2, Download, Eye, Lock, X } from 'lucide-react';
+import JSZip from 'jszip';
+import { Archive, CheckCircle2, Download, Eye, Lock, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { formatBytes, formatReduction, triggerBlobDownload } from '../core/formatters';
 import { ProcessedOutput, ProgressState } from '../types/speedpdf';
@@ -36,6 +37,16 @@ export function OutputPanel({
     (item.mimeType === 'application/pdf' ||
       item.mimeType === 'image/jpeg' ||
       item.mimeType === 'image/png');
+
+  const handleDownloadAllZip = async () => {
+    const zip = new JSZip();
+    outputs.forEach((item, index) => {
+      const name = item.fileName || `archivo_${index + 1}.pdf`;
+      zip.file(name, item.blob);
+    });
+    const zipBlob = await zip.generateAsync({ type: 'blob' });
+    triggerBlobDownload(zipBlob, 'SPEED_PDF_resultados.zip');
+  };
 
   return (
     <section className="space-y-4">
@@ -75,13 +86,27 @@ export function OutputPanel({
 
       {outputs.length > 0 && (
         <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between">
+          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-sm font-display font-semibold text-slate-900 dark:text-slate-100">
               Resultados listos en el dispositivo
             </h3>
-            <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-              {outputs.length} {outputs.length === 1 ? 'archivo generado' : 'archivos generados'}
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                {outputs.length} {outputs.length === 1 ? 'archivo generado' : 'archivos generados'}
+              </span>
+              {outputs.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    void handleDownloadAllZip();
+                  }}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Archive className="w-3.5 h-3.5" />
+                  <span>Descargar todos (.zip)</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <ul className="divide-y divide-slate-200 dark:divide-slate-800">

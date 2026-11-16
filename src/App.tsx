@@ -1,14 +1,20 @@
+import { X } from 'lucide-react';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { ArchitectureView } from './components/ArchitectureView';
 import { FileQueuePanel } from './components/FileQueuePanel';
 import { OutputPanel } from './components/OutputPanel';
 import { ToolSettingsPanel } from './components/ToolSettingsPanel';
 import { TopBar } from './components/TopBar';
+import { UpdateCheckerPanel } from './components/UpdateCheckerPanel';
 import { ContextMenuActionType, WindowsExplorerView } from './components/WindowsExplorerView';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
+import {
+  convertMixedBatchToSeparatePdfs,
+  convertMixedBatchToSinglePdf,
+} from './core/batchPdfEngine';
 import { decryptVaultLocal, encryptBlobLocal } from './core/cryptoVault';
 import { docxToPdf, pdfToDocx } from './core/docxBridge';
-import { formatBytes, stripExtension } from './core/formatters';
+import { formatBytes, stripExtension, triggerSequentialDownloads } from './core/formatters';
 import {
   compressPdf,
   imagesToPdf,
@@ -24,6 +30,7 @@ import {
 } from './core/sampleFactory';
 import {
   AppSection,
+  BatchConvertMode,
   CompressionSettings,
   ExplorerSimFile,
   ImageExportSettings,
@@ -52,6 +59,13 @@ const TOOL_METADATA: Record<
       'Combina documentos en un único PDF, ajusta su orden de lectura y selecciona rangos de páginas específicos.',
     acceptedHint: '2 o más archivos PDF (.pdf)',
     acceptAttr: '.pdf,application/pdf',
+  },
+  'batch-to-pdf': {
+    title: 'Lote mixto a PDF',
+    description:
+      'Convierte varios archivos de distinto formato (.pdf, .docx, .jpg, .png) juntos en un solo PDF o en un PDF por separado para cada archivo.',
+    acceptedHint: 'PDF, Word (.docx), JPG o PNG combinados',
+    acceptAttr: '.pdf,.docx,.jpg,.jpeg,.png',
   },
   'pdf-to-img': {
     title: 'Convertir PDF a JPG o PNG',
@@ -150,8 +164,11 @@ export default function App() {
   });
 
   const [vaultMode, setVaultMode] = useState<'encrypt' | 'decrypt'>('encrypt');
+  const [batchConvertMode, setBatchConvertMode] = useState<BatchConvertMode>('single-pdf');
+  const [batchOutputName, setBatchOutputName] = useState('lote_convertido_unificado');
   const [encryptOutput, setEncryptOutput] = useState(false);
   const [vaultPassword, setVaultPassword] = useState('');
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -184,7 +201,9 @@ export default function App() {
       setActiveTool('compress');
     } else if (
       section === 'converter' &&
-      !['pdf-to-img', 'img-to-pdf', 'pdf-to-word', 'word-to-pdf'].includes(activeTool)
+      !['batch-to-pdf', 'pdf-to-img', 'img-to-pdf', 'pdf-to-word', 'word-to-pdf'].includes(
+        activeTool
+      )
     ) {
       setActiveTool('pdf-to-word');
     }
@@ -287,6 +306,11 @@ export default function App() {
       const f1 = await createSamplePdfFile('Contrato_Principal.pdf', 2);
       const f2 = await createSamplePdfFile('Anexo_Tecnico.pdf', 2);
       await addFilesToQueue([f1, f2], true);
+    } else if (activeTool === 'batch-to-pdf') {
+      const f1 = await createSamplePdfFile('Informe_Corporativo_2026.pdf', 2);
+      const f2 = await createSampleDocxFile('Propuesta_Comercial.docx');
+      const f3 = await createSampleImageFile('Portada_AltaRes.jpg');
+      await addFilesToQueue([f1, f2, f3], true);
     } else if (activeTool === 'img-to-pdf') {
       const img1 = await createSampleImageFile('Portada_AltaRes.jpg');
       const img2 = await createSampleImageFile('Anexo_Visual.jpg');
@@ -300,8 +324,12 @@ export default function App() {
     }
   };
 
-  const executeToolWithItems = async (toolToRun: PdfToolId, itemsToProcess: QueueFileItem[]) => {
-    if (itemsToProcess.length === 0) return;
+  const executeToolWithItems = async (
+    toolToRun: PdfToolId,
+    itemsToProcess: QueueFileItem[],
+    batchModeOverride?: BatchConvertMode
+  ): Promise<ProcessedOutput[]> => {
+    if (itemsToProcess.length === 0) return [];
     setErrorMessage(null);
 
     try {
@@ -370,6 +398,47 @@ export default function App() {
           res.pageCount
         );
         createdOutputs.push(out);
+      } else if (toolToRun === 'batch-to-pdf') {
+        const effectiveMode = batchModeOverride ?? batchConvertMode;
+        const convertible = itemsToProcess.filter((i) => i.kind !== 'vault');
+        if (convertible.length === 0) {
+          throw new Error('Carga al menos un archivo PDF, Word (.docx) o imagen (JPG/PNG).');
+        }
+        if (effectiveMode === 'single-pdf') {
+          const totalInSize = convertible.reduce((acc, i) => acc + i.size, 0);
+          const res = await convertMixedBatchToSinglePdf(
+            convertible,
+            batchOutputName,
+            imageToPdf,
+            wordSettings,
+            setProgress
+          );
+          const out = await maybeEncrypt(
+            res.blob,
+            res.fileName,
+            totalInSize,
+            `Lote mixto unificado (${convertible.length} archivos · ${res.pageCount} pág.)`,
+            res.pageCount
+          );
+          createdOutputs.push(out);
+        } else {
+          const results = await convertMixedBatchToSeparatePdfs(
+            convertible,
+            imageToPdf,
+            wordSettings,
+            setProgress
+          );
+          for (const res of results) {
+            const out = await maybeEncrypt(
+              res.blob,
+              res.fileName,
+              res.originalSize,
+              `PDF individual (${res.sourceKind.toUpperCase()} · ${res.pageCount} pág.)`,
+              res.pageCount
+            );
+            createdOutputs.push(out);
+          }
+        }
       } else if (toolToRun === 'pdf-to-img') {
         const pdfItems = itemsToProcess.filter((i) => i.kind === 'pdf');
         if (pdfItems.length === 0) {
@@ -484,11 +553,13 @@ export default function App() {
       }
 
       setOutputs((prev) => [...createdOutputs, ...prev]);
+      return createdOutputs;
     } catch (err) {
       setProgress({ active: false, percent: 0, stage: '' });
       setErrorMessage(
         err instanceof Error ? err.message : 'Ocurrió un error al procesar el archivo.'
       );
+      return [];
     }
   };
 
@@ -510,13 +581,20 @@ export default function App() {
 
   const handleExplorerContextAction = async (
     action: ContextMenuActionType,
-    simFiles: ExplorerSimFile[]
-  ) => {
+    simFiles: ExplorerSimFile[],
+    linkedDirectory?: {
+      name: string;
+      getFileHandle: (name: string, opts?: { create?: boolean }) => Promise<{
+        createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
+      }>;
+    } | null
+  ): Promise<ExplorerSimFile[]> => {
     const files = await materializeSimFiles(simFiles);
-    if (files.length === 0) return;
+    if (files.length === 0) return [];
 
     let targetTool: PdfToolId = 'compress';
     let autoRun = false;
+    let batchModeOverride: BatchConvertMode | undefined;
 
     if (action === 'auto-compress') {
       targetTool = 'compress';
@@ -530,6 +608,16 @@ export default function App() {
     } else if (action === 'merge-images') {
       targetTool = 'img-to-pdf';
       autoRun = true;
+    } else if (action === 'convert-all-single-pdf') {
+      targetTool = 'batch-to-pdf';
+      batchModeOverride = 'single-pdf';
+      setBatchConvertMode('single-pdf');
+      autoRun = true;
+    } else if (action === 'convert-all-separate-pdfs') {
+      targetTool = 'batch-to-pdf';
+      batchModeOverride = 'separate-pdfs';
+      setBatchConvertMode('separate-pdfs');
+      autoRun = true;
     } else if (action === 'auto-to-word') {
       targetTool = 'pdf-to-word';
       autoRun = true;
@@ -540,23 +628,84 @@ export default function App() {
       targetTool = simFiles[0]?.extension === 'docx' ? 'word-to-pdf' : 'img-to-pdf';
       autoRun = true;
     } else {
+      const hasMultipleTypes = new Set(simFiles.map((s) => s.extension)).size > 1;
       const firstExt = simFiles[0]?.extension;
-      targetTool =
-        firstExt === 'docx' ? 'word-to-pdf' : firstExt === 'pdf' ? 'compress' : 'img-to-pdf';
+      targetTool = hasMultipleTypes
+        ? 'batch-to-pdf'
+        : firstExt === 'docx'
+        ? 'word-to-pdf'
+        : firstExt === 'pdf'
+        ? 'compress'
+        : 'img-to-pdf';
       autoRun = false;
     }
 
-    handleSelectTool(targetTool);
-    const items = await addFilesToQueue(files, true);
-    setContextBanner(
-      autoRun
-        ? `Acción directa desde Explorador de Windows ejecutada para ${files.length} archivo(s).`
-        : `Archivo(s) cargados desde Explorador de Windows para personalizar ajustes antes de procesar.`
-    );
-
-    if (autoRun) {
-      await executeToolWithItems(targetTool, items);
+    if (!autoRun) {
+      handleSelectTool(targetTool);
+      await addFilesToQueue(files, true);
+      setContextBanner(
+        'Archivo(s) cargados desde Explorador de Windows para personalizar ajustes antes de procesar.'
+      );
+      return [];
     }
+
+    // Conversión automática directa desde clic derecho: procesa y descarga/guarda en el directorio origen
+    const items: QueueFileItem[] = files.map((file) => ({
+      id: crypto.randomUUID(),
+      file,
+      name: file.name,
+      size: file.size,
+      kind: detectFileKind(file),
+      pageRange: 'Todas',
+      addedAt: Date.now(),
+    }));
+
+    const created = await executeToolWithItems(targetTool, items, batchModeOverride);
+    if (created.length === 0) return [];
+
+    let savedDirectlyToFolder = false;
+    if (linkedDirectory) {
+      try {
+        for (const out of created) {
+          const handle = await linkedDirectory.getFileHandle(out.fileName, { create: true });
+          const writable = await handle.createWritable();
+          await writable.write(out.blob);
+          await writable.close();
+        }
+        savedDirectlyToFolder = true;
+      } catch {
+        savedDirectlyToFolder = false;
+      }
+    }
+
+    if (!savedDirectlyToFolder) {
+      triggerSequentialDownloads(
+        created.map((out) => ({ blob: out.blob, fileName: out.fileName }))
+      );
+    }
+
+    return created.map((out) => {
+      const lower = out.fileName.toLowerCase();
+      const extension: ExplorerSimFile['extension'] = lower.endsWith('.docx')
+        ? 'docx'
+        : lower.endsWith('.zip')
+        ? 'zip'
+        : lower.endsWith('.png')
+        ? 'png'
+        : lower.endsWith('.jpg') || lower.endsWith('.jpeg')
+        ? 'jpg'
+        : 'pdf';
+
+      return {
+        id: `gen-${out.id}`,
+        name: out.fileName,
+        extension,
+        size: out.outputSize,
+        modified: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
+        realFile: new File([out.blob], out.fileName, { type: out.mimeType }),
+        isGeneratedOutput: true,
+      };
+    });
   };
 
   const currentMeta = TOOL_METADATA[activeTool];
@@ -585,7 +734,10 @@ export default function App() {
 
       <main className="flex-1 flex flex-col">
         {activeSection === 'windows' ? (
-          <WindowsExplorerView onExecuteContextAction={handleExplorerContextAction} />
+          <WindowsExplorerView
+            progress={progress}
+            onExecuteContextAction={handleExplorerContextAction}
+          />
         ) : activeSection === 'architecture' ? (
           <ArchitectureView />
         ) : (
@@ -595,6 +747,7 @@ export default function App() {
               onSelectTool={handleSelectTool}
               theme={theme}
               onSetTheme={setTheme}
+              onOpenUpdates={() => setIsUpdateModalOpen(true)}
             />
 
             <div className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 space-y-6">
@@ -680,6 +833,10 @@ export default function App() {
                 onChangeWordSettings={setWordSettings}
                 vaultMode={vaultMode}
                 onChangeVaultMode={setVaultMode}
+                batchConvertMode={batchConvertMode}
+                onChangeBatchConvertMode={setBatchConvertMode}
+                batchOutputName={batchOutputName}
+                onChangeBatchOutputName={setBatchOutputName}
                 encryptOutput={encryptOutput}
                 onChangeEncryptOutput={setEncryptOutput}
                 vaultPassword={vaultPassword}
@@ -699,6 +856,32 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {isUpdateModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Buscar actualizaciones de SPEED.PDF"
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-2xl rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 sm:p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm font-display font-semibold text-slate-900 dark:text-slate-100">
+                Centro de actualizaciones SPEED.PDF
+              </span>
+              <button
+                type="button"
+                onClick={() => setIsUpdateModalOpen(false)}
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Cerrar actualizaciones"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <UpdateCheckerPanel compact />
+          </div>
+        </div>
+      )}
     </div>
   );
 }

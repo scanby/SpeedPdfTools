@@ -1,5 +1,6 @@
 import { Lock, Play } from 'lucide-react';
 import {
+  BatchConvertMode,
   CompressionPreset,
   CompressionSettings,
   ImageExportSettings,
@@ -27,6 +28,10 @@ interface ToolSettingsPanelProps {
   onChangeWordSettings: (next: WordConversionSettings) => void;
   vaultMode: 'encrypt' | 'decrypt';
   onChangeVaultMode: (mode: 'encrypt' | 'decrypt') => void;
+  batchConvertMode: BatchConvertMode;
+  onChangeBatchConvertMode: (mode: BatchConvertMode) => void;
+  batchOutputName: string;
+  onChangeBatchOutputName: (val: string) => void;
   encryptOutput: boolean;
   onChangeEncryptOutput: (val: boolean) => void;
   vaultPassword: string;
@@ -95,6 +100,10 @@ export function ToolSettingsPanel({
   onChangeWordSettings,
   vaultMode,
   onChangeVaultMode,
+  batchConvertMode,
+  onChangeBatchConvertMode,
+  batchOutputName,
+  onChangeBatchOutputName,
   encryptOutput,
   onChangeEncryptOutput,
   vaultPassword,
@@ -117,6 +126,10 @@ export function ToolSettingsPanel({
         return fileCount > 1 ? `Comprimir ${fileCount} PDFs` : 'Comprimir PDF';
       case 'merge':
         return `Unir ${fileCount} archivos PDF`;
+      case 'batch-to-pdf':
+        return batchConvertMode === 'single-pdf'
+          ? `Convertir ${fileCount} archivos en 1 PDF`
+          : `Generar ${fileCount} PDFs por separado`;
       case 'pdf-to-img':
         return 'Convertir PDF a imágenes';
       case 'img-to-pdf':
@@ -462,6 +475,57 @@ export function ToolSettingsPanel({
               <span>Conservar saltos de página originales</span>
             </label>
           </div>
+        </div>
+      )}
+
+      {activeTool === 'batch-to-pdf' && (
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => onChangeBatchConvertMode('single-pdf')}
+              className={`p-3 rounded-lg border text-left transition-colors ${
+                batchConvertMode === 'single-pdf'
+                  ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40 text-slate-900 dark:text-white'
+                  : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <div className="text-sm font-medium">Convertir todos en un solo PDF</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Une PDFs, Word (.docx) e imágenes en un documento continuo
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChangeBatchConvertMode('separate-pdfs')}
+              className={`p-3 rounded-lg border text-left transition-colors ${
+                batchConvertMode === 'separate-pdfs'
+                  ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40 text-slate-900 dark:text-white'
+                  : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-300'
+              }`}
+            >
+              <div className="text-sm font-medium">Generar cada archivo en un PDF por separado</div>
+              <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Convierte cada archivo seleccionado manteniendo su nombre individual
+              </div>
+            </button>
+          </div>
+
+          {batchConvertMode === 'single-pdf' && (
+            <label className="block max-w-md space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Nombre del PDF unificado
+              </span>
+              <input
+                type="text"
+                value={batchOutputName}
+                onChange={(e) => onChangeBatchOutputName(e.target.value)}
+                placeholder="lote_convertido_unificado"
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+            </label>
+          )}
         </div>
       )}
 

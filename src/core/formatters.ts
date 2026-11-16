@@ -116,6 +116,21 @@ export function triggerBlobDownload(blob: Blob, fileName: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
 
+export function triggerSequentialDownloads(
+  items: { blob: Blob; fileName: string }[],
+  delayMs = 180
+): void {
+  items.forEach((item, index) => {
+    if (index === 0) {
+      triggerBlobDownload(item.blob, item.fileName);
+    } else {
+      setTimeout(() => {
+        triggerBlobDownload(item.blob, item.fileName);
+      }, index * delayMs);
+    }
+  });
+}
+
 export function yieldToMain(): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, 0);

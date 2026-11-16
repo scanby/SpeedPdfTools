@@ -169,7 +169,8 @@ export function FileQueuePanel({
                     </label>
                   )}
 
-                  {(activeTool === 'merge' || activeTool === 'img-to-pdf') && items.length > 1 && (
+                  {(activeTool === 'merge' || activeTool === 'img-to-pdf' || activeTool === 'batch-to-pdf') &&
+                    items.length > 1 && (
                     <div className="flex items-center gap-1">
                       <button
                         type="button"

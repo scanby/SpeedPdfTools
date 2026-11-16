@@ -3,11 +3,14 @@ export type AppSection = 'workspace' | 'converter' | 'windows' | 'architecture';
 export type PdfToolId =
   | 'compress'
   | 'merge'
+  | 'batch-to-pdf'
   | 'pdf-to-img'
   | 'img-to-pdf'
   | 'pdf-to-word'
   | 'word-to-pdf'
   | 'vault';
+
+export type BatchConvertMode = 'single-pdf' | 'separate-pdfs';
 
 export type CompressionPreset = 'extreme' | 'balanced' | 'high' | 'lossless' | 'custom';
 
@@ -84,8 +87,9 @@ export type WindowsTargetVersion = 'win7' | 'win10' | 'win11';
 export interface ExplorerSimFile {
   id: string;
   name: string;
-  extension: 'pdf' | 'docx' | 'jpg' | 'png';
+  extension: 'pdf' | 'docx' | 'jpg' | 'png' | 'zip';
   size: number;
   modified: string;
   realFile?: File;
+  isGeneratedOutput?: boolean;
 }
