@@ -1,0 +1,6 @@
+{
+  "name": "SPEED.PDF",
+  "description": "Estación de trabajo local minimalista para compresión, fusión y conversión cifrada de archivos PDF con integración para el explorador de Windows 7–11.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
