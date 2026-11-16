@@ -1,5 +1,5 @@
 export const CURRENT_APP_VERSION = '0.1.0';
-export const DEFAULT_GITHUB_REPO = 'scanby/Speed-pdf';
+export const DEFAULT_GITHUB_REPO = 'scanby/SpeedPdfTools';
 
 export type UpdateCheckStatus =
   | 'idle'
@@ -202,7 +202,7 @@ export async function checkForUpdatesFromRepo(repoInput: string): Promise<Update
         repo,
         checkedAt,
         message:
-          'No se pudo acceder al repositorio (404). Verifica que exista y sea público o contenga la rama main.',
+          'No se pudo acceder al repositorio (404). Si el repositorio es privado en GitHub, cámbialo a público para consultar lanzamientos sin token, o verifica el nombre y rama principal.',
       };
     }
 

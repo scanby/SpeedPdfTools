@@ -62,7 +62,7 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
               type="text"
               value={repoInput}
               onChange={(e) => setRepoInput(e.target.value)}
-              placeholder="scanby/Speed-pdf"
+              placeholder="scanby/SpeedPdfTools"
               className="w-full pl-9 pr-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
           </div>

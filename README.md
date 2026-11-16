@@ -66,4 +66,4 @@ Los ejecutables generados quedan en `release-assets/` y también se compilan aut
 
 ## Repositorio remoto
 
-Configurado para [`https://github.com/scanby/Speed-pdf.git`](https://github.com/scanby/Speed-pdf.git).
+Configurado para [`https://github.com/scanby/SpeedPdfTools.git`](https://github.com/scanby/SpeedPdfTools.git).
