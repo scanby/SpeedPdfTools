@@ -1,4 +1,4 @@
-import * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { Document, HeadingLevel, Packer, PageBreak, Paragraph, TextRun } from 'docx';
 import mammoth from 'mammoth';
 import { PDFDocument, PageSizes, StandardFonts, rgb } from 'pdf-lib';

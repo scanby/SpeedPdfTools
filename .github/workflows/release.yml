@@ -37,7 +37,8 @@ jobs:
           $env:ELECTRON_BUILD = "true"
           npm run build
           if (Test-Path "desktop/renderer") { Remove-Item -Recurse -Force "desktop/renderer" }
-          Copy-Item -Recurse -Force "dist" "desktop/renderer"
+          New-Item -ItemType Directory -Force -Path "desktop/renderer" | Out-Null
+          Copy-Item -Recurse -Force "dist\*" "desktop/renderer"
 
       - name: Sync release version
         shell: pwsh

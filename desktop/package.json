@@ -16,6 +16,7 @@
     "appId": "com.speedpdf.desktop",
     "productName": "SPEED.PDF",
     "electronVersion": "22.3.27",
+    "asar": false,
     "directories": {
       "output": "../release-assets"
     },

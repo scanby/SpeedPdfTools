@@ -6,6 +6,7 @@ import {defineConfig} from 'vite';
 export default defineConfig(() => {
   return {
     base: process.env.ELECTRON_BUILD === 'true' ? './' : '/',
+    build: process.env.ELECTRON_BUILD === 'true' ? { target: 'chrome108' } : undefined,
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

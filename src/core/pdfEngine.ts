@@ -1,5 +1,5 @@
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import JSZip from 'jszip';
 import { PDFDocument, PageSizes } from 'pdf-lib';
 import {
