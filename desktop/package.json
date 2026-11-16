@@ -30,8 +30,7 @@
         {
           "target": "nsis",
           "arch": [
-            "x64",
-            "ia32"
+            "x64"
           ]
         },
         {
@@ -45,9 +44,11 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
+      "allowElevation": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "displayLanguageSelector": false,
       "include": "installer.nsh",
       "artifactName": "SPEED.PDF-Setup-${version}.${ext}"
     },

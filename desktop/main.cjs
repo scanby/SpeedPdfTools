@@ -22,11 +22,11 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 const MIME_TYPES = {
-  '.html': 'text/html; charset=utf-8',
-  '.js': 'application/javascript; charset=utf-8',
-  '.mjs': 'application/javascript; charset=utf-8',
-  '.css': 'text/css; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
+  '.html': 'text/html',
+  '.js': 'application/javascript',
+  '.mjs': 'application/javascript',
+  '.css': 'text/css',
+  '.json': 'application/json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -36,6 +36,8 @@ const MIME_TYPES = {
   '.woff': 'font/woff',
   '.wasm': 'application/wasm',
 };
+
+const UTF8_TEXT_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg']);
 
 let mainWindow = null;
 let pendingLaunchPayload = null;
@@ -52,7 +54,7 @@ function registerAppProtocol() {
       let targetPath = path.resolve(rendererRoot, relPath);
       const relFromRoot = path.relative(rendererRoot, targetPath);
       if (relFromRoot.startsWith('..') || path.isAbsolute(relFromRoot)) {
-        callback({ statusCode: 403, data: Buffer.from('Forbidden') });
+        callback({ statusCode: 403, mimeType: 'text/plain', charset: 'utf-8', data: Buffer.from('Forbidden') });
         return;
       }
 
@@ -63,7 +65,8 @@ function registerAppProtocol() {
         if (path.extname(relPath)) {
           callback({
             statusCode: 404,
-            mimeType: 'text/plain; charset=utf-8',
+            mimeType: 'text/plain',
+            charset: 'utf-8',
             data: Buffer.from(`Asset not found: ${relPath}`),
           });
           return;
@@ -74,15 +77,20 @@ function registerAppProtocol() {
 
       const ext = path.extname(targetPath).toLowerCase();
       const mimeType = MIME_TYPES[ext] || 'application/octet-stream';
-      callback({
+      const response = {
         statusCode: 200,
         mimeType,
         data: fileBuffer,
-      });
+      };
+      if (UTF8_TEXT_EXTS.has(ext)) {
+        response.charset = 'utf-8';
+      }
+      callback(response);
     } catch (err) {
       callback({
         statusCode: 500,
-        mimeType: 'text/plain; charset=utf-8',
+        mimeType: 'text/plain',
+        charset: 'utf-8',
         data: Buffer.from(`Error cargando SPEED.PDF: ${err.message}`),
       });
     }
