@@ -11,4 +11,7 @@ contextBridge.exposeInMainWorld('speedPdfDesktop', {
     ipcRenderer.on('speedpdf:launch-args', handler);
     return () => ipcRenderer.removeListener('speedpdf:launch-args', handler);
   },
+  getShellStatus: () => ipcRenderer.invoke('speedpdf:get-shell-status'),
+  installShellMenu: () => ipcRenderer.invoke('speedpdf:install-shell-menu'),
+  uninstallShellMenu: () => ipcRenderer.invoke('speedpdf:uninstall-shell-menu'),
 });

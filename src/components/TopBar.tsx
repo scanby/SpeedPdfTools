@@ -10,8 +10,6 @@ interface TopBarProps {
 const NAV_ITEMS: { id: AppSection; label: string }[] = [
   { id: 'workspace', label: 'Estación PDF' },
   { id: 'converter', label: 'Conversor' },
-  { id: 'windows', label: 'Menú Windows' },
-  { id: 'architecture', label: 'Arquitectura' },
 ];
 
 export function TopBar({ activeSection, onSelectSection, onTriggerFilePicker }: TopBarProps) {

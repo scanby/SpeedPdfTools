@@ -3,6 +3,7 @@ import {
   FileImage,
   Files,
   FileText,
+  FolderCog,
   Images,
   Layers,
   Lock,
@@ -20,6 +21,8 @@ interface WorkspaceSidebarProps {
   theme: 'dark' | 'light';
   onSetTheme: (theme: 'dark' | 'light') => void;
   onOpenUpdates: () => void;
+  onOpenWindowsIntegration: () => void;
+  windowsShellActive?: boolean | null;
 }
 
 interface ToolNavGroup {
@@ -104,6 +107,8 @@ export function WorkspaceSidebar({
   theme,
   onSetTheme,
   onOpenUpdates,
+  onOpenWindowsIntegration,
+  windowsShellActive,
 }: WorkspaceSidebarProps) {
   return (
     <aside className="w-full lg:w-[264px] shrink-0 border-b lg:border-b-0 lg:border-r border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-900/40 p-4 flex flex-col justify-between gap-6">
@@ -181,6 +186,26 @@ export function WorkspaceSidebar({
             </button>
           </div>
         </div>
+
+        <button
+          type="button"
+          onClick={onOpenWindowsIntegration}
+          className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800/80 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-medium text-slate-700 dark:text-slate-200 transition-colors"
+        >
+          <span className="inline-flex items-center gap-2 truncate">
+            <FolderCog className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span className="truncate">Explorador Windows</span>
+          </span>
+          {windowsShellActive === true ? (
+            <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0">
+              Activo
+            </span>
+          ) : windowsShellActive === false ? (
+            <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 shrink-0">
+              Inactivo
+            </span>
+          ) : null}
+        </button>
 
         <button
           type="button"

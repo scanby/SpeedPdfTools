@@ -1,4 +1,4 @@
-export type AppSection = 'workspace' | 'converter' | 'windows' | 'architecture';
+export type AppSection = 'workspace' | 'converter';
 
 export type PdfToolId =
   | 'compress'

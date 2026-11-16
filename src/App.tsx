@@ -1,12 +1,10 @@
-import { X } from 'lucide-react';
+import { CheckCircle2, Download, FolderCog, Trash2, X } from 'lucide-react';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
-import { ArchitectureView } from './components/ArchitectureView';
 import { FileQueuePanel } from './components/FileQueuePanel';
 import { OutputPanel } from './components/OutputPanel';
 import { ToolSettingsPanel } from './components/ToolSettingsPanel';
 import { TopBar } from './components/TopBar';
 import { UpdateCheckerPanel } from './components/UpdateCheckerPanel';
-import { ContextMenuActionType, WindowsExplorerView } from './components/WindowsExplorerView';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import {
   convertMixedBatchToSeparatePdfs,
@@ -15,11 +13,16 @@ import {
 import { decryptVaultLocal, encryptBlobLocal } from './core/cryptoVault';
 import {
   DesktopLaunchPayload,
+  DesktopShellStatus,
   desktopResultToFile,
   getDesktopBridge,
 } from './core/desktopBridge';
 import { docxToPdf, pdfToDocx } from './core/docxBridge';
-import { formatBytes, stripExtension, triggerSequentialDownloads } from './core/formatters';
+import {
+  formatBytes,
+  stripExtension,
+  triggerBlobDownload,
+} from './core/formatters';
 import {
   compressPdf,
   imagesToPdf,
@@ -34,10 +37,13 @@ import {
   createSamplePdfFile,
 } from './core/sampleFactory';
 import {
+  generateInstallRegistryScript,
+  generateUninstallRegistryScript,
+} from './core/windowsShell';
+import {
   AppSection,
   BatchConvertMode,
   CompressionSettings,
-  ExplorerSimFile,
   ImageExportSettings,
   ImageToPdfSettings,
   PdfToolId,
@@ -174,6 +180,10 @@ export default function App() {
   const [encryptOutput, setEncryptOutput] = useState(false);
   const [vaultPassword, setVaultPassword] = useState('');
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [isShellModalOpen, setIsShellModalOpen] = useState(false);
+  const [shellStatus, setShellStatus] = useState<DesktopShellStatus | null>(null);
+  const [shellBusy, setShellBusy] = useState(false);
+  const [shellFeedback, setShellFeedback] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -271,9 +281,6 @@ export default function App() {
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       void addFilesToQueue(e.target.files);
-      if (activeSection === 'windows' || activeSection === 'architecture') {
-        setActiveSection('workspace');
-      }
       e.target.value = '';
     }
   };
@@ -332,7 +339,8 @@ export default function App() {
   const executeToolWithItems = async (
     toolToRun: PdfToolId,
     itemsToProcess: QueueFileItem[],
-    batchModeOverride?: BatchConvertMode
+    batchModeOverride?: BatchConvertMode,
+    imageFormatOverride?: ImageExportSettings['format']
   ): Promise<ProcessedOutput[]> => {
     if (itemsToProcess.length === 0) return [];
     setErrorMessage(null);
@@ -449,13 +457,16 @@ export default function App() {
         if (pdfItems.length === 0) {
           throw new Error('Carga un archivo PDF para exportar a JPG/PNG.');
         }
+        const effectiveImgConfig: ImageExportSettings = imageFormatOverride
+          ? { ...imageExport, format: imageFormatOverride }
+          : imageExport;
         for (const item of pdfItems) {
-          const res = await pdfToImages(item.file, imageExport, setProgress);
+          const res = await pdfToImages(item.file, effectiveImgConfig, setProgress);
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
             item.size,
-            `Exportado a ${imageExport.format.toUpperCase()} · ${imageExport.dpi} DPI (${res.pageCount} pág.)`,
+            `Exportado a ${effectiveImgConfig.format.toUpperCase()} · ${effectiveImgConfig.dpi} DPI (${res.pageCount} pág.)`,
             res.pageCount
           );
           createdOutputs.push(out);
@@ -568,151 +579,6 @@ export default function App() {
     }
   };
 
-  const materializeSimFiles = async (simFiles: ExplorerSimFile[]): Promise<File[]> => {
-    const out: File[] = [];
-    for (const sf of simFiles) {
-      if (sf.realFile) {
-        out.push(sf.realFile);
-      } else if (sf.extension === 'pdf') {
-        out.push(await createSamplePdfFile(sf.name, 3));
-      } else if (sf.extension === 'docx') {
-        out.push(await createSampleDocxFile(sf.name));
-      } else {
-        out.push(await createSampleImageFile(sf.name));
-      }
-    }
-    return out;
-  };
-
-  const handleExplorerContextAction = async (
-    action: ContextMenuActionType,
-    simFiles: ExplorerSimFile[],
-    linkedDirectory?: {
-      name: string;
-      getFileHandle: (name: string, opts?: { create?: boolean }) => Promise<{
-        createWritable: () => Promise<{ write: (data: Blob) => Promise<void>; close: () => Promise<void> }>;
-      }>;
-    } | null
-  ): Promise<ExplorerSimFile[]> => {
-    const files = await materializeSimFiles(simFiles);
-    if (files.length === 0) return [];
-
-    let targetTool: PdfToolId = 'compress';
-    let autoRun = false;
-    let batchModeOverride: BatchConvertMode | undefined;
-
-    if (action === 'auto-compress') {
-      targetTool = 'compress';
-      autoRun = true;
-    } else if (action === 'custom-compress') {
-      targetTool = 'compress';
-      autoRun = false;
-    } else if (action === 'merge-selected') {
-      targetTool = 'merge';
-      autoRun = true;
-    } else if (action === 'merge-images') {
-      targetTool = 'img-to-pdf';
-      autoRun = true;
-    } else if (action === 'convert-all-single-pdf') {
-      targetTool = 'batch-to-pdf';
-      batchModeOverride = 'single-pdf';
-      setBatchConvertMode('single-pdf');
-      autoRun = true;
-    } else if (action === 'convert-all-separate-pdfs') {
-      targetTool = 'batch-to-pdf';
-      batchModeOverride = 'separate-pdfs';
-      setBatchConvertMode('separate-pdfs');
-      autoRun = true;
-    } else if (action === 'auto-to-word') {
-      targetTool = 'pdf-to-word';
-      autoRun = true;
-    } else if (action === 'auto-to-jpg') {
-      targetTool = 'pdf-to-img';
-      autoRun = true;
-    } else if (action === 'auto-to-pdf') {
-      targetTool = simFiles[0]?.extension === 'docx' ? 'word-to-pdf' : 'img-to-pdf';
-      autoRun = true;
-    } else {
-      const hasMultipleTypes = new Set(simFiles.map((s) => s.extension)).size > 1;
-      const firstExt = simFiles[0]?.extension;
-      targetTool = hasMultipleTypes
-        ? 'batch-to-pdf'
-        : firstExt === 'docx'
-        ? 'word-to-pdf'
-        : firstExt === 'pdf'
-        ? 'compress'
-        : 'img-to-pdf';
-      autoRun = false;
-    }
-
-    if (!autoRun) {
-      handleSelectTool(targetTool);
-      await addFilesToQueue(files, true);
-      setContextBanner(
-        'Archivo(s) cargados desde Explorador de Windows para personalizar ajustes antes de procesar.'
-      );
-      return [];
-    }
-
-    // Conversión automática directa desde clic derecho: procesa y descarga/guarda en el directorio origen
-    const items: QueueFileItem[] = files.map((file) => ({
-      id: crypto.randomUUID(),
-      file,
-      name: file.name,
-      size: file.size,
-      kind: detectFileKind(file),
-      pageRange: 'Todas',
-      addedAt: Date.now(),
-    }));
-
-    const created = await executeToolWithItems(targetTool, items, batchModeOverride);
-    if (created.length === 0) return [];
-
-    let savedDirectlyToFolder = false;
-    if (linkedDirectory) {
-      try {
-        for (const out of created) {
-          const handle = await linkedDirectory.getFileHandle(out.fileName, { create: true });
-          const writable = await handle.createWritable();
-          await writable.write(out.blob);
-          await writable.close();
-        }
-        savedDirectlyToFolder = true;
-      } catch {
-        savedDirectlyToFolder = false;
-      }
-    }
-
-    if (!savedDirectlyToFolder) {
-      triggerSequentialDownloads(
-        created.map((out) => ({ blob: out.blob, fileName: out.fileName }))
-      );
-    }
-
-    return created.map((out) => {
-      const lower = out.fileName.toLowerCase();
-      const extension: ExplorerSimFile['extension'] = lower.endsWith('.docx')
-        ? 'docx'
-        : lower.endsWith('.zip')
-        ? 'zip'
-        : lower.endsWith('.png')
-        ? 'png'
-        : lower.endsWith('.jpg') || lower.endsWith('.jpeg')
-        ? 'jpg'
-        : 'pdf';
-
-      return {
-        id: `gen-${out.id}`,
-        name: out.fileName,
-        extension,
-        size: out.outputSize,
-        modified: new Date().toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' }),
-        realFile: new File([out.blob], out.fileName, { type: out.mimeType }),
-        isGeneratedOutput: true,
-      };
-    });
-  };
-
   const desktopHandlerRef = useRef<(payload: DesktopLaunchPayload) => Promise<void>>(async () => {});
   desktopHandlerRef.current = async (payload: DesktopLaunchPayload) => {
     const bridge = getDesktopBridge();
@@ -725,22 +591,37 @@ export default function App() {
     let targetTool: PdfToolId = 'compress';
     let autoRun = payload.autoConvert && !payload.customUi;
     let batchOverride: BatchConvertMode | undefined;
+    let imgFormatOverride: ImageExportSettings['format'] | undefined;
 
     if (payload.mode === 'batch-single-pdf') {
       targetTool = 'batch-to-pdf';
       batchOverride = 'single-pdf';
       setBatchConvertMode('single-pdf');
-      autoRun = true;
+      autoRun = !payload.customUi;
     } else if (payload.mode === 'batch-separate-pdfs') {
       targetTool = 'batch-to-pdf';
       batchOverride = 'separate-pdfs';
       setBatchConvertMode('separate-pdfs');
-      autoRun = true;
+      autoRun = !payload.customUi;
     } else if (payload.mode === 'merge') {
       targetTool = 'merge';
+      autoRun = !payload.customUi && files.length >= 2;
+    } else if (payload.mode === 'word-to-pdf') {
+      targetTool = 'word-to-pdf';
+      autoRun = payload.autoConvert && !payload.customUi;
+    } else if (payload.mode === 'img-to-pdf') {
+      targetTool = 'img-to-pdf';
+      autoRun = payload.autoConvert && !payload.customUi;
+    } else if (payload.mode === 'compress' && payload.autoConvert) {
+      targetTool = 'compress';
       autoRun = true;
     } else if (payload.autoConvert && payload.format === 'docx') {
       targetTool = 'pdf-to-word';
+      autoRun = true;
+    } else if (payload.autoConvert && (payload.format === 'jpg' || payload.format === 'png')) {
+      targetTool = 'pdf-to-img';
+      imgFormatOverride = payload.format === 'png' ? 'png' : 'jpeg';
+      setImageExport((prev) => ({ ...prev, format: imgFormatOverride ?? prev.format }));
       autoRun = true;
     } else if (payload.autoConvert && payload.format === 'pdf') {
       const hasMixed = files.length > 1 && new Set(files.map(detectFileKind)).size > 1;
@@ -761,30 +642,64 @@ export default function App() {
 
     if (!autoRun) {
       setContextBanner(
-        `Archivo(s) cargados desde Explorador de Windows (${payload.sourceDir}) para personalizar ajustes.`
+        payload.mode === 'merge' && files.length < 2
+          ? `Selecciona al menos 2 PDFs para unir o agrega otro documento aquí (${payload.sourceDir}).`
+          : `Archivo(s) cargados desde el Explorador de Windows (${payload.sourceDir}) listos para ajustar.`
       );
       return;
     }
 
-    const created = await executeToolWithItems(targetTool, items, batchOverride);
+    const created = await executeToolWithItems(
+      targetTool,
+      items,
+      batchOverride,
+      imgFormatOverride
+    );
     if (created.length > 0) {
-      const savedPaths: string[] = [];
+      const savedNames: string[] = [];
       for (const out of created) {
         const bytes = new Uint8Array(await out.blob.arrayBuffer());
-        const savedPath = await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
-        savedPaths.push(savedPath);
+        await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+        savedNames.push(out.fileName);
       }
-      setContextBanner(`Guardado automáticamente en ${payload.sourceDir}: ${savedPaths.join(', ')}`);
+      setContextBanner(
+        `Guardado automáticamente en ${payload.sourceDir}: ${savedNames.join(', ')}`
+      );
     }
   };
 
   useEffect(() => {
     const bridge = getDesktopBridge();
     if (!bridge) return;
+    void bridge.getShellStatus().then(setShellStatus).catch(() => {});
     return bridge.onShellLaunchArgs((payload) => {
       void desktopHandlerRef.current(payload);
     });
   }, []);
+
+  const handleToggleDesktopShell = async (install: boolean) => {
+    const bridge = getDesktopBridge();
+    if (!bridge) return;
+    setShellBusy(true);
+    setShellFeedback(null);
+    try {
+      const next = install ? await bridge.installShellMenu() : await bridge.uninstallShellMenu();
+      setShellStatus(next);
+      setShellFeedback(
+        next.integrated
+          ? 'Menú contextual SPEED.PDF integrado correctamente en el Explorador de Windows.'
+          : 'Entradas de SPEED.PDF eliminadas del menú contextual de Windows.'
+      );
+    } catch (err) {
+      setShellFeedback(
+        err instanceof Error
+          ? `No se pudo actualizar el registro de Windows: ${err.message}`
+          : 'No se pudo actualizar el registro de Windows.'
+      );
+    } finally {
+      setShellBusy(false);
+    }
+  };
 
   const currentMeta = TOOL_METADATA[activeTool];
   const totalQueueBytes = useMemo(() => queue.reduce((sum, q) => sum + q.size, 0), [queue]);
@@ -801,32 +716,25 @@ export default function App() {
         ref={fileInputRef}
         type="file"
         multiple
-        accept={
-          activeSection === 'workspace' || activeSection === 'converter'
-            ? currentMeta.acceptAttr
-            : '.pdf,.docx,.jpg,.jpeg,.png,.speedvault'
-        }
+        accept={currentMeta.acceptAttr}
         onChange={handleFileInputChange}
         className="sr-only"
       />
 
       <main className="flex-1 flex flex-col">
-        {activeSection === 'windows' ? (
-          <WindowsExplorerView
-            progress={progress}
-            onExecuteContextAction={handleExplorerContextAction}
+        <div className="flex-1 max-w-[1440px] w-full mx-auto flex flex-col lg:flex-row">
+          <WorkspaceSidebar
+            activeTool={activeTool}
+            onSelectTool={handleSelectTool}
+            theme={theme}
+            onSetTheme={setTheme}
+            onOpenUpdates={() => setIsUpdateModalOpen(true)}
+            onOpenWindowsIntegration={() => {
+              setShellFeedback(null);
+              setIsShellModalOpen(true);
+            }}
+            windowsShellActive={shellStatus ? shellStatus.integrated : null}
           />
-        ) : activeSection === 'architecture' ? (
-          <ArchitectureView />
-        ) : (
-          <div className="flex-1 max-w-[1440px] w-full mx-auto flex flex-col lg:flex-row">
-            <WorkspaceSidebar
-              activeTool={activeTool}
-              onSelectTool={handleSelectTool}
-              theme={theme}
-              onSetTheme={setTheme}
-              onOpenUpdates={() => setIsUpdateModalOpen(true)}
-            />
 
             <div className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 space-y-6">
               {/* Contextual Workspace Breadcrumb & Header */}
@@ -932,8 +840,136 @@ export default function App() {
               />
             </div>
           </div>
-        )}
       </main>
+
+      {isShellModalOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Integración con Explorador de Windows"
+          className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4"
+        >
+          <div className="w-full max-w-lg rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-2">
+                <FolderCog className="w-4 h-4 text-blue-600 dark:text-blue-400" />
+                <span className="text-sm font-display font-semibold text-slate-900 dark:text-slate-100">
+                  Menú contextual en Explorador de Windows
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsShellModalOpen(false)}
+                className="p-1.5 rounded-lg border border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Cerrar integración Windows"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+              Al hacer clic derecho sobre archivos en el Explorador de Windows aparecerá el submenú{' '}
+              <strong className="text-slate-800 dark:text-slate-200">SPEED.PDF</strong> adaptado automáticamente al tipo de archivo seleccionado:
+            </p>
+
+            <ul className="text-xs text-slate-600 dark:text-slate-300 space-y-1.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
+              <li>
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Convertir a Word o JPG
+              </li>
+              <li>
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.docx</strong> → Convertir a PDF, Unir en 1 PDF o PDFs separados
+              </li>
+              <li>
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.jpg / .png</strong> → Convertir a PDF, Unir imágenes o PDFs separados
+              </li>
+              <li>
+                <strong className="font-mono text-slate-800 dark:text-slate-100">Lote mixto</strong> → Convertir todos en un solo PDF o cada archivo por separado
+              </li>
+            </ul>
+
+            {shellStatus?.supported ? (
+              <div className="space-y-3">
+                <div className="text-xs text-slate-500 dark:text-slate-400 font-mono truncate">
+                  Ejecutable: {shellStatus.exePath}
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={shellBusy}
+                    onClick={() => void handleToggleDesktopShell(true)}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white transition-colors"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    <span>
+                      {shellStatus.integrated
+                        ? 'Actualizar menú en Windows'
+                        : 'Activar menú en Windows'}
+                    </span>
+                  </button>
+                  {shellStatus.integrated && (
+                    <button
+                      type="button"
+                      disabled={shellBusy}
+                      onClick={() => void handleToggleDesktopShell(false)}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-60 transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Quitar de Windows</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    triggerBlobDownload(
+                      new Blob(
+                        [
+                          generateInstallRegistryScript({
+                            installPath: 'C:\\Program Files\\SPEED.PDF\\SPEED.PDF.exe',
+                          }),
+                        ],
+                        { type: 'text/plain;charset=utf-8' }
+                      ),
+                      'install_speedpdf_context_menu.reg'
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-medium rounded-lg bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Descargar registro Windows (.reg)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    triggerBlobDownload(
+                      new Blob([generateUninstallRegistryScript()], {
+                        type: 'text/plain;charset=utf-8',
+                      }),
+                      'uninstall_speedpdf_context_menu.reg'
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                >
+                  <span>Desinstalar (.reg)</span>
+                </button>
+              </div>
+            )}
+
+            {shellFeedback && (
+              <p className="text-xs text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 rounded-lg px-3 py-2">
+                {shellFeedback}
+              </p>
+            )}
+
+            <p className="text-[11px] text-slate-500 dark:text-slate-400">
+              Nota: En Windows 11 aparecerá bajo &ldquo;Mostrar más opciones&rdquo; (o directamente en el menú clásico).
+            </p>
+          </div>
+        </div>
+      )}
 
       {isUpdateModalOpen && (
         <div

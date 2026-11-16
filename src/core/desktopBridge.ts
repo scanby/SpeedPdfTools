@@ -16,12 +16,21 @@ export interface DesktopReadFileResult {
   data: Uint8Array;
 }
 
+export interface DesktopShellStatus {
+  supported: boolean;
+  integrated: boolean;
+  exePath: string;
+}
+
 export interface SpeedPdfDesktopApi {
   isDesktop: boolean;
   readFiles: (filePaths: string[]) => Promise<DesktopReadFileResult[]>;
   writeFile: (targetDir: string, fileName: string, bytes: Uint8Array) => Promise<string>;
   openExternal: (url: string) => Promise<void>;
   onShellLaunchArgs: (callback: (payload: DesktopLaunchPayload) => void) => () => void;
+  getShellStatus: () => Promise<DesktopShellStatus>;
+  installShellMenu: () => Promise<DesktopShellStatus>;
+  uninstallShellMenu: () => Promise<DesktopShellStatus>;
 }
 
 declare global {
