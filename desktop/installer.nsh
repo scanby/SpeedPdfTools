@@ -41,12 +41,12 @@
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\04_ToWord" "MUIVerb" "Convertir a Word (.docx)"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\04_ToWord" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\04_ToWord" "MultiSelectModel" "Player"
-  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\04_ToWord\command" "" '"$INSTDIR\SPEED.PDF.exe" --auto-convert --format=docx --output-dir=source --input="%1"'
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\04_ToWord\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=pdf-to-word --auto-convert --format=docx --output-dir=source --input="%1"'
 
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\05_ToJpg" "MUIVerb" "Convertir paginas a JPG"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\05_ToJpg" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\05_ToJpg" "MultiSelectModel" "Player"
-  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\05_ToJpg\command" "" '"$INSTDIR\SPEED.PDF.exe" --auto-convert --format=jpg --output-dir=source --input="%1"'
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\05_ToJpg\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=pdf-to-img --auto-convert --format=jpg --output-dir=source --input="%1"'
 
   ; 2. Submenú cascada SPEED.PDF para documentos .docx
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.docx\shell\SpeedPdfMenu" "MUIVerb" "SPEED.PDF"
@@ -57,7 +57,7 @@
   WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\01_ToPdf" "MUIVerb" "Convertir a PDF automaticamente"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\01_ToPdf" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\01_ToPdf" "MultiSelectModel" "Player"
-  WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\01_ToPdf\command" "" '"$INSTDIR\SPEED.PDF.exe" --auto-convert --format=pdf --output-dir=source --input="%1"'
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\01_ToPdf\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=word-to-pdf --auto-convert --format=pdf --output-dir=source --input="%1"'
 
   WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\02_BatchSingle" "MUIVerb" "Convertir todos en un solo PDF"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.DocxMenu\shell\02_BatchSingle" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
@@ -98,7 +98,7 @@
   WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\01_ToPdf" "MUIVerb" "Convertir a PDF automaticamente"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\01_ToPdf" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\01_ToPdf" "MultiSelectModel" "Player"
-  WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\01_ToPdf\command" "" '"$INSTDIR\SPEED.PDF.exe" --auto-convert --format=pdf --output-dir=source --input="%1"'
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\01_ToPdf\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=img-to-pdf --auto-convert --format=pdf --output-dir=source --input="%1"'
 
   WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\02_BatchSingle" "MUIVerb" "Unir imagenes en un solo PDF"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.ImageMenu\shell\02_BatchSingle" "Icon" "$INSTDIR\SPEED.PDF.exe,0"

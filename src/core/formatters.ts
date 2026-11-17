@@ -105,6 +105,22 @@ export function stripExtension(fileName: string): string {
   return idx > 0 ? fileName.slice(0, idx) : fileName;
 }
 
+export function resolveUniqueFileName(desiredName: string, usedNamesLower: Set<string>): string {
+  const dotIdx = desiredName.lastIndexOf('.');
+  const hasExt = dotIdx > 0;
+  const base = hasExt ? desiredName.slice(0, dotIdx) : desiredName;
+  const ext = hasExt ? desiredName.slice(dotIdx) : '';
+
+  let candidate = desiredName;
+  let copyIndex = 1;
+  while (usedNamesLower.has(candidate.toLowerCase())) {
+    candidate = copyIndex === 1 ? `${base} (copia)${ext}` : `${base} (copia ${copyIndex})${ext}`;
+    copyIndex += 1;
+  }
+  usedNamesLower.add(candidate.toLowerCase());
+  return candidate;
+}
+
 export function triggerBlobDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');

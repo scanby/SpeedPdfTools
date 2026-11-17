@@ -21,6 +21,7 @@ import {
 import { docxToPdf, pdfToDocx } from './core/docxBridge';
 import {
   formatBytes,
+  resolveUniqueFileName,
   stripExtension,
   triggerBlobDownload,
 } from './core/formatters';
@@ -620,7 +621,8 @@ export default function App() {
     batchModeOverride?: BatchConvertMode,
     imageFormatOverride?: ImageExportSettings['format'],
     onProgressUpdate?: (state: ProgressState) => void,
-    onToolError?: (message: string) => void
+    onToolError?: (message: string) => void,
+    outputNameOverride?: string
   ): Promise<ProcessedOutput[]> => {
     if (toolToRun !== 'organize' && itemsToProcess.length === 0) return [];
     setErrorMessage(null);
@@ -633,6 +635,7 @@ export default function App() {
     try {
       const started = performance.now();
       const createdOutputs: ProcessedOutput[] = [];
+      const usedOutputNamesLower = new Set<string>();
 
       const maybeEncrypt = async (
         blob: Blob,
@@ -645,7 +648,8 @@ export default function App() {
         const finalBlob = shouldEncrypt
           ? await encryptBlobLocal(blob, vaultPassword, fileName)
           : blob;
-        const finalName = shouldEncrypt ? `${fileName}.speedvault` : fileName;
+        const desiredName = shouldEncrypt ? `${fileName}.speedvault` : fileName;
+        const finalName = resolveUniqueFileName(desiredName, usedOutputNamesLower);
 
         return {
           id: crypto.randomUUID(),
@@ -692,7 +696,12 @@ export default function App() {
           throw new Error('Se necesitan al menos 2 archivos PDF para unir.');
         }
         const totalInSize = pdfItems.reduce((acc, i) => acc + i.size, 0);
-        const res = await mergePdfs(pdfItems, mergeStripMetadata, mergeOutputName, reportProgress);
+        const res = await mergePdfs(
+          pdfItems,
+          mergeStripMetadata,
+          outputNameOverride ?? mergeOutputName,
+          reportProgress
+        );
         const out = await maybeEncrypt(
           res.blob,
           res.fileName,
@@ -711,7 +720,7 @@ export default function App() {
         const res = await assembleOrganizedPdf(
           organizerFiles,
           organizerPages,
-          organizeOutputName,
+          outputNameOverride ?? organizeOutputName,
           organizeStripMetadata,
           reportProgress
         );
@@ -756,7 +765,7 @@ export default function App() {
           const totalInSize = convertible.reduce((acc, i) => acc + i.size, 0);
           const res = await convertMixedBatchToSinglePdf(
             convertible,
-            batchOutputName,
+            outputNameOverride ?? batchOutputName,
             imageToPdf,
             wordSettings,
             reportProgress
@@ -796,20 +805,22 @@ export default function App() {
           ? { ...imageExport, format: imageFormatOverride }
           : imageExport;
         for (const item of pdfItems) {
-          const res = await pdfToImages(
+          const results = await pdfToImages(
             item.file,
             effectiveImgConfig,
             reportProgress,
             item.rotation ?? 0
           );
-          const out = await maybeEncrypt(
-            res.blob,
-            res.fileName,
-            item.size,
-            `Exportado a ${effectiveImgConfig.format.toUpperCase()} · ${effectiveImgConfig.dpi} DPI (${res.pageCount} pág.)`,
-            res.pageCount
-          );
-          createdOutputs.push(out);
+          for (const res of results) {
+            const out = await maybeEncrypt(
+              res.blob,
+              res.fileName,
+              item.size,
+              `Exportado a ${effectiveImgConfig.format.toUpperCase()} · ${effectiveImgConfig.dpi} DPI (${res.pageCount} pág.)`,
+              res.pageCount
+            );
+            createdOutputs.push(out);
+          }
         }
       } else if (toolToRun === 'img-to-pdf') {
         const imgItems = itemsToProcess.filter((i) => i.kind === 'image');
@@ -879,7 +890,7 @@ export default function App() {
             createdOutputs.push({
               id: crypto.randomUUID(),
               tool: 'vault',
-              fileName: `${item.name}.speedvault`,
+              fileName: resolveUniqueFileName(`${item.name}.speedvault`, usedOutputNamesLower),
               mimeType: 'application/octet-stream',
               blob: encryptedBlob,
               originalSize: item.size,
@@ -891,10 +902,12 @@ export default function App() {
             });
           } else {
             const decrypted = await decryptVaultLocal(item.file, vaultPassword);
+            const desiredDecryptedName =
+              decrypted.metadata.originalName || `${stripExtension(item.name)}`;
             createdOutputs.push({
               id: crypto.randomUUID(),
               tool: 'vault',
-              fileName: decrypted.metadata.originalName || `${stripExtension(item.name)}`,
+              fileName: resolveUniqueFileName(desiredDecryptedName, usedOutputNamesLower),
               mimeType: decrypted.metadata.mimeType,
               blob: decrypted.blob,
               originalSize: item.size,
@@ -941,49 +954,84 @@ export default function App() {
       let autoRun = payload.autoConvert && !payload.customUi;
       let batchOverride: BatchConvertMode | undefined;
       let imgFormatOverride: ImageExportSettings['format'] | undefined;
+      let outputNameOverride: string | undefined;
 
-      if (payload.mode === 'batch-single-pdf') {
+      const normalizedMode = (payload.mode || '').trim().toLowerCase();
+      const normalizedFormat = (payload.format || '').trim().toLowerCase();
+      const fileKinds = new Set(files.map(detectFileKind));
+      const firstBase = stripExtension(files[0].name);
+
+      if (normalizedMode === 'batch-single-pdf') {
         targetTool = 'batch-to-pdf';
         batchOverride = 'single-pdf';
         setBatchConvertMode('single-pdf');
+        outputNameOverride = `${firstBase}_lote_a_pdf`;
         autoRun = !payload.customUi;
-      } else if (payload.mode === 'batch-separate-pdfs') {
+      } else if (normalizedMode === 'batch-separate-pdfs') {
         targetTool = 'batch-to-pdf';
         batchOverride = 'separate-pdfs';
         setBatchConvertMode('separate-pdfs');
         autoRun = !payload.customUi;
-      } else if (payload.mode === 'merge') {
+      } else if (normalizedMode === 'merge') {
         targetTool = 'merge';
+        outputNameOverride = `${firstBase}_unido`;
         autoRun = !payload.customUi && files.length >= 2;
-      } else if (payload.mode === 'word-to-pdf') {
+      } else if (normalizedMode === 'organize') {
+        targetTool = 'organize';
+        autoRun = false;
+      } else if (normalizedMode === 'rotate') {
+        targetTool = 'rotate';
+        autoRun = !payload.customUi;
+      } else if (normalizedMode === 'pdf-to-word' || normalizedFormat === 'docx') {
+        targetTool = 'pdf-to-word';
+        autoRun = payload.autoConvert && !payload.customUi;
+      } else if (
+        normalizedMode === 'pdf-to-img' ||
+        normalizedFormat === 'jpg' ||
+        normalizedFormat === 'jpeg' ||
+        normalizedFormat === 'png'
+      ) {
+        targetTool = 'pdf-to-img';
+        imgFormatOverride = normalizedFormat === 'png' ? 'png' : 'jpeg';
+        setImageExport((prev) => ({ ...prev, format: imgFormatOverride ?? prev.format }));
+        autoRun = payload.autoConvert && !payload.customUi;
+      } else if (normalizedMode === 'word-to-pdf') {
         targetTool = 'word-to-pdf';
         autoRun = payload.autoConvert && !payload.customUi;
-      } else if (payload.mode === 'img-to-pdf') {
+      } else if (normalizedMode === 'img-to-pdf') {
         targetTool = 'img-to-pdf';
         autoRun = payload.autoConvert && !payload.customUi;
-      } else if (payload.mode === 'compress' && payload.autoConvert) {
+      } else if (normalizedFormat === 'pdf') {
+        if (fileKinds.size > 1) {
+          targetTool = 'batch-to-pdf';
+          batchOverride = 'single-pdf';
+          setBatchConvertMode('single-pdf');
+          outputNameOverride = `${firstBase}_lote_a_pdf`;
+        } else if (fileKinds.has('docx')) {
+          targetTool = 'word-to-pdf';
+        } else if (fileKinds.has('image')) {
+          targetTool = 'img-to-pdf';
+        } else {
+          targetTool = 'compress';
+        }
+        autoRun = payload.autoConvert && !payload.customUi;
+      } else if (normalizedMode === 'compress') {
         targetTool = 'compress';
-        autoRun = true;
-      } else if (payload.autoConvert && payload.format === 'docx') {
-        targetTool = 'pdf-to-word';
-        autoRun = true;
-      } else if (payload.autoConvert && (payload.format === 'jpg' || payload.format === 'png')) {
-        targetTool = 'pdf-to-img';
-        imgFormatOverride = payload.format === 'png' ? 'png' : 'jpeg';
-        setImageExport((prev) => ({ ...prev, format: imgFormatOverride ?? prev.format }));
-        autoRun = true;
-      } else if (payload.autoConvert && payload.format === 'pdf') {
-        const hasMixed = files.length > 1 && new Set(files.map(detectFileKind)).size > 1;
-        const firstKind = detectFileKind(files[0]);
-        targetTool = hasMixed
-          ? 'batch-to-pdf'
-          : firstKind === 'docx'
-          ? 'word-to-pdf'
-          : 'img-to-pdf';
-        autoRun = true;
+        autoRun = payload.autoConvert && !payload.customUi;
       } else {
-        targetTool = 'compress';
-        autoRun = false;
+        if (fileKinds.size > 1) {
+          targetTool = 'batch-to-pdf';
+          batchOverride = 'single-pdf';
+          setBatchConvertMode('single-pdf');
+          outputNameOverride = `${firstBase}_lote_a_pdf`;
+        } else if (fileKinds.has('docx')) {
+          targetTool = 'word-to-pdf';
+        } else if (fileKinds.has('image')) {
+          targetTool = 'img-to-pdf';
+        } else {
+          targetTool = 'compress';
+        }
+        autoRun = payload.autoConvert && !payload.customUi;
       }
 
       handleSelectTool(targetTool);
@@ -992,7 +1040,7 @@ export default function App() {
       if (!autoRun) {
         await bridge.showMainWindow();
         setContextBanner(
-          payload.mode === 'merge' && files.length < 2
+          targetTool === 'merge' && files.length < 2
             ? `Selecciona al menos 2 PDFs para unir o agrega otro documento aquí (${payload.sourceDir}).`
             : `Archivo(s) cargados desde el Explorador de Windows (${payload.sourceDir}) listos para ajustar.`
         );
@@ -1027,7 +1075,8 @@ export default function App() {
         sendBgProgress,
         (msg) => {
           capturedError = msg;
-        }
+        },
+        outputNameOverride
       );
 
       if (created.length > 0) {
@@ -1037,11 +1086,18 @@ export default function App() {
           stage: `Guardando ${created.length} archivo(s) en la carpeta original...`,
         });
         const savedNames: string[] = [];
+        const updatedOutputs: ProcessedOutput[] = [];
         for (const out of created) {
           const bytes = new Uint8Array(await out.blob.arrayBuffer());
-          await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
-          savedNames.push(out.fileName);
+          const writeResult = await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+          const actualName =
+            typeof writeResult === 'string'
+              ? writeResult.split(/[/\\]/).pop() || out.fileName
+              : writeResult.fileName;
+          savedNames.push(actualName);
+          updatedOutputs.push({ ...out, fileName: actualName });
         }
+        setOutputs(updatedOutputs);
         const summary = `Guardado en ${payload.sourceDir}: ${savedNames.join(', ')}`;
         setContextBanner(summary);
         await bridge.completeBackgroundTask({

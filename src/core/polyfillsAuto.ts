@@ -146,4 +146,17 @@ if (typeof MapCtor.groupBy !== 'function') {
   };
 }
 
+if (
+  typeof Response !== 'undefined' &&
+  typeof (Response.prototype as { bytes?: unknown }).bytes !== 'function'
+) {
+  Object.defineProperty(Response.prototype, 'bytes', {
+    configurable: true,
+    writable: true,
+    value: async function bytes(this: Response): Promise<Uint8Array> {
+      return new Uint8Array(await this.arrayBuffer());
+    },
+  });
+}
+
 export {};

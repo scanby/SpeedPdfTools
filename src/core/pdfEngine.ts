@@ -1,4 +1,4 @@
-import { pdfjsLib } from './pdfjsSetup';
+import { openPdfDocument } from './pdfjsSetup';
 import JSZip from 'jszip';
 import { PDFDocument, PDFPage, PageSizes, degrees } from 'pdf-lib';
 import {
@@ -58,7 +58,7 @@ export async function inspectPdfFile(file: File): Promise<{
   thumbnailUrl?: string;
 }> {
   const buffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  const loadingTask = openPdfDocument(new Uint8Array(buffer));
   const pdf = await loadingTask.promise;
 
   try {
@@ -75,9 +75,11 @@ export async function inspectPdfFile(file: File): Promise<{
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(scaled.width));
       canvas.height = Math.max(1, Math.floor(scaled.height));
-      const ctx = canvas.getContext('2d');
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
       if (ctx) {
-        await page.render({ canvasContext: ctx, viewport: scaled, canvas }).promise;
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        await page.render({ canvas: null, canvasContext: ctx, viewport: scaled }).promise;
         thumbnailUrl = canvas.toDataURL('image/jpeg', 0.72);
       }
       releaseCanvas(canvas);
@@ -157,7 +159,7 @@ export async function compressPdf(
   }
 
   // Visual chunked recompression at target DPI & JPEG quality
-  const loadingTask = pdfjsLib.getDocument({ data: sourceBytes });
+  const loadingTask = openPdfDocument(sourceBytes);
   const srcPdf = await loadingTask.promise;
   const outDoc = await PDFDocument.create();
   const totalPages = srcPdf.numPages;
@@ -182,7 +184,7 @@ export async function compressPdf(
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(renderViewport.width));
       canvas.height = Math.max(1, Math.floor(renderViewport.height));
-      const ctx = canvas.getContext('2d', { alpha: false });
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
 
       if (!ctx) {
         throw new Error('Contexto gráfico 2D no disponible en el navegador.');
@@ -191,7 +193,7 @@ export async function compressPdf(
       ctx.fillStyle = '#ffffff';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      await page.render({ canvasContext: ctx, viewport: renderViewport, canvas }).promise;
+      await page.render({ canvas: null, canvasContext: ctx, viewport: renderViewport }).promise;
       const jpegBlob = await canvasToBlob(canvas, 'image/jpeg', settings.jpegQuality);
       const jpegBytes = new Uint8Array(await jpegBlob.arrayBuffer());
 
@@ -367,10 +369,10 @@ export async function pdfToImages(
   settings: ImageExportSettings,
   onProgress: (state: ProgressState) => void,
   extraRotation = 0
-): Promise<{ blob: Blob; fileName: string; pageCount: number }> {
+): Promise<{ blob: Blob; fileName: string; pageCount: number }[]> {
   const sourceBytes = new Uint8Array(await file.arrayBuffer());
   const rotNorm = normalizeRotation(extraRotation);
-  const loadingTask = pdfjsLib.getDocument({ data: sourceBytes });
+  const loadingTask = openPdfDocument(sourceBytes);
   const pdf = await loadingTask.promise;
   const totalPages = pdf.numPages;
   const ext = settings.format === 'png' ? 'png' : 'jpg';
@@ -380,7 +382,7 @@ export async function pdfToImages(
   try {
     const scale = settings.dpi / 72;
 
-    if (totalPages === 1 && !settings.bundleAsZip) {
+    if (totalPages === 1) {
       onProgress({
         active: true,
         percent: 45,
@@ -394,15 +396,16 @@ export async function pdfToImages(
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(viewport.width));
       canvas.height = Math.max(1, Math.floor(viewport.height));
-      const ctx = canvas.getContext('2d', { alpha: settings.format === 'png' });
+      const ctx = canvas.getContext('2d', {
+        alpha: settings.format === 'png',
+        willReadFrequently: true,
+      });
 
       if (!ctx) throw new Error('Contexto gráfico no disponible.');
-      if (settings.format === 'jpeg') {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+      await page.render({ canvas: null, canvasContext: ctx, viewport }).promise;
       const imgBlob = await canvasToBlob(
         canvas,
         mimeType,
@@ -412,14 +415,17 @@ export async function pdfToImages(
       page.cleanup();
 
       onProgress({ active: false, percent: 100, stage: 'Completado', currentPage: 1, totalPages: 1 });
-      return {
-        blob: imgBlob,
-        fileName: `${baseName}_pagina_1.${ext}`,
-        pageCount: 1,
-      };
+      return [
+        {
+          blob: imgBlob,
+          fileName: `${baseName}_a_${ext}.${ext}`,
+          pageCount: 1,
+        },
+      ];
     }
 
-    const zip = new JSZip();
+    const individualOutputs: { blob: Blob; fileName: string; pageCount: number }[] = [];
+    const zip = settings.bundleAsZip ? new JSZip() : null;
 
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
       onProgress({
@@ -435,15 +441,16 @@ export async function pdfToImages(
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(viewport.width));
       canvas.height = Math.max(1, Math.floor(viewport.height));
-      const ctx = canvas.getContext('2d', { alpha: settings.format === 'png' });
+      const ctx = canvas.getContext('2d', {
+        alpha: settings.format === 'png',
+        willReadFrequently: true,
+      });
 
       if (!ctx) throw new Error('Contexto gráfico no disponible.');
-      if (settings.format === 'jpeg') {
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-      }
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+      await page.render({ canvas: null, canvasContext: ctx, viewport }).promise;
       const imgBlob = await canvasToBlob(
         canvas,
         mimeType,
@@ -454,26 +461,42 @@ export async function pdfToImages(
       page.cleanup();
 
       const padded = String(pageNum).padStart(3, '0');
-      zip.file(`${baseName}_pag_${padded}.${ext}`, imgBlob);
+      const pageFileName = `${baseName}_a_${ext}_pag_${padded}.${ext}`;
+      if (zip) {
+        zip.file(pageFileName, imgBlob);
+      } else {
+        individualOutputs.push({
+          blob: imgBlob,
+          fileName: pageFileName,
+          pageCount: totalPages,
+        });
+      }
       await yieldToMain();
     }
 
-    onProgress({
-      active: true,
-      percent: 94,
-      stage: 'Comprimiendo paquete ZIP local...',
-      currentPage: totalPages,
-      totalPages,
-    });
+    if (zip) {
+      onProgress({
+        active: true,
+        percent: 94,
+        stage: 'Comprimiendo paquete ZIP local...',
+        currentPage: totalPages,
+        totalPages,
+      });
 
-    const zipBlob = await zip.generateAsync({ type: 'blob' });
+      const zipBlob = await zip.generateAsync({ type: 'blob' });
+      onProgress({ active: false, percent: 100, stage: 'Completado', currentPage: totalPages, totalPages });
+
+      return [
+        {
+          blob: zipBlob,
+          fileName: `${baseName}_paginas_${ext}.zip`,
+          pageCount: totalPages,
+        },
+      ];
+    }
+
     onProgress({ active: false, percent: 100, stage: 'Completado', currentPage: totalPages, totalPages });
-
-    return {
-      blob: zipBlob,
-      fileName: `${baseName}_imagenes_${settings.dpi}dpi.zip`,
-      pageCount: totalPages,
-    };
+    return individualOutputs;
   } finally {
     await pdf.cleanup();
     await loadingTask.destroy();
@@ -613,7 +636,10 @@ export async function imagesToPdf(
 
   clearMetadata(outDoc);
   const outBytes = await outDoc.save({ useObjectStreams: true });
-  const baseName = files.length === 1 ? stripExtension(files[0].name) : 'imagenes_convertidas';
+  const baseName =
+    files.length === 1
+      ? `${stripExtension(files[0].name)}_a_pdf`
+      : `${stripExtension(files[0].name)}_imagenes_a_pdf`;
 
   onProgress({ active: false, percent: 100, stage: 'Completado', currentPage: files.length, totalPages: files.length });
 
@@ -626,7 +652,7 @@ export async function imagesToPdf(
 
 export async function getPdfPageCount(file: File): Promise<number> {
   const buffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  const loadingTask = openPdfDocument(new Uint8Array(buffer));
   const pdf = await loadingTask.promise;
   try {
     return pdf.numPages;
@@ -642,7 +668,7 @@ export async function renderPdfAllPageThumbnails(
   isCancelled?: () => boolean
 ): Promise<number> {
   const buffer = await file.arrayBuffer();
-  const loadingTask = pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  const loadingTask = openPdfDocument(new Uint8Array(buffer));
   const pdf = await loadingTask.promise;
 
   try {
@@ -659,11 +685,11 @@ export async function renderPdfAllPageThumbnails(
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(viewport.width));
       canvas.height = Math.max(1, Math.floor(viewport.height));
-      const ctx = canvas.getContext('2d', { alpha: false });
+      const ctx = canvas.getContext('2d', { alpha: false, willReadFrequently: true });
       if (ctx) {
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+        await page.render({ canvas: null, canvasContext: ctx, viewport }).promise;
         const dataUrl = canvas.toDataURL('image/jpeg', 0.74);
         if (!isCancelled?.()) {
           onPageRendered(pageNum, dataUrl);

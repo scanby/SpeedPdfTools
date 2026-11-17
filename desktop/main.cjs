@@ -77,7 +77,11 @@ const MIME_TYPES = {
   '.webp': 'image/webp',
   '.woff2': 'font/woff2',
   '.woff': 'font/woff',
+  '.ttf': 'font/ttf',
   '.wasm': 'application/wasm',
+  '.bcmap': 'application/octet-stream',
+  '.pfb': 'application/octet-stream',
+  '.icc': 'application/vnd.iccprofile',
 };
 
 const UTF8_TEXT_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg']);
@@ -430,8 +434,8 @@ function registerAppProtocol() {
 
 function parseCliArgs(argv) {
   const args = argv.slice(app.isPackaged ? 1 : 2);
-  let mode = 'compress';
-  let format = 'pdf';
+  let mode = '';
+  let format = '';
   let outputDir = 'source';
   let autoConvert = false;
   let customUi = false;
@@ -758,14 +762,14 @@ function buildInstallRegContent(exePath) {
     `"Icon"="${exe},0"`,
     '"MultiSelectModel"="Player"',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\04_ToWord\\command]',
-    `@="\\"${exe}\\" --auto-convert --format=docx --output-dir=source --input=\\"%1\\""`,
+    `@="\\"${exe}\\" --mode=pdf-to-word --auto-convert --format=docx --output-dir=source --input=\\"%1\\""`,
     '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg]',
     '"MUIVerb"="Convertir páginas a JPG"',
     `"Icon"="${exe},0"`,
     '"MultiSelectModel"="Player"',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg\\command]',
-    `@="\\"${exe}\\" --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
+    `@="\\"${exe}\\" --mode=pdf-to-img --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
     '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.docx\\shell\\SpeedPdfMenu]',
     '"MUIVerb"="SPEED.PDF"',
@@ -778,7 +782,7 @@ function buildInstallRegContent(exePath) {
     `"Icon"="${exe},0"`,
     '"MultiSelectModel"="Player"',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.DocxMenu\\shell\\01_ToPdf\\command]',
-    `@="\\"${exe}\\" --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
+    `@="\\"${exe}\\" --mode=word-to-pdf --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
     '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.DocxMenu\\shell\\02_BatchSingle]',
     '"MUIVerb"="Convertir todos en un solo PDF"',
@@ -820,7 +824,7 @@ function buildInstallRegContent(exePath) {
     `"Icon"="${exe},0"`,
     '"MultiSelectModel"="Player"',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.ImageMenu\\shell\\01_ToPdf\\command]',
-    `@="\\"${exe}\\" --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
+    `@="\\"${exe}\\" --mode=img-to-pdf --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
     '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.ImageMenu\\shell\\02_BatchSingle]',
     '"MUIVerb"="Unir imágenes en un solo PDF"',
@@ -1050,6 +1054,17 @@ async function refreshShellMenuIfOutdated() {
       return;
     }
 
+    let jpgCmdOut = '';
+    try {
+      jpgCmdOut = await runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg\\command',
+        '/ve',
+      ]);
+    } catch {
+      jpgCmdOut = '';
+    }
+
     const pdfNeedsRepair =
       !registeredPdfExe ||
       isTempExecutablePath(registeredPdfExe) ||
@@ -1062,7 +1077,9 @@ async function refreshShellMenuIfOutdated() {
       !hasValidRuntimeForExe(registeredBatchExe) ||
       registeredBatchExe.toLowerCase() !== preferredExe.toLowerCase();
 
-    if (pdfNeedsRepair || batchNeedsRepair) {
+    const commandsNeedUpgrade = !/--mode=pdf-to-img/i.test(jpgCmdOut);
+
+    if (pdfNeedsRepair || batchNeedsRepair || commandsNeedUpgrade) {
       await importRegContent(buildInstallRegContent(preferredExe));
     }
   } catch (err) {
@@ -1375,11 +1392,28 @@ ipcMain.handle('speedpdf:read-files', async (_event, filePaths) => {
   return results;
 });
 
+function resolveUniqueFilePath(targetDir, desiredName) {
+  const safeName = path.basename(desiredName);
+  const ext = path.extname(safeName);
+  const base = ext ? safeName.slice(0, -ext.length) : safeName;
+  let candidateName = safeName;
+  let candidatePath = path.join(targetDir, candidateName);
+  let copyIndex = 1;
+
+  while (fs.existsSync(candidatePath)) {
+    candidateName =
+      copyIndex === 1 ? `${base} (copia)${ext}` : `${base} (copia ${copyIndex})${ext}`;
+    candidatePath = path.join(targetDir, candidateName);
+    copyIndex += 1;
+  }
+
+  return { fullPath: candidatePath, fileName: candidateName };
+}
+
 ipcMain.handle('speedpdf:write-file', async (_event, { targetDir, fileName, bytes }) => {
-  const safeName = path.basename(fileName);
-  const fullPath = path.join(targetDir, safeName);
+  const { fullPath, fileName: uniqueFileName } = resolveUniqueFilePath(targetDir, fileName);
   await fsp.writeFile(fullPath, Buffer.from(bytes));
-  return fullPath;
+  return { fullPath, fileName: uniqueFileName };
 });
 
 ipcMain.handle('speedpdf:open-external', async (_event, url) => {

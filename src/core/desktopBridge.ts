@@ -47,7 +47,11 @@ export interface SpeedPdfDesktopApi {
   isPortable: boolean;
   appVersion: string;
   readFiles: (filePaths: string[]) => Promise<DesktopReadFileResult[]>;
-  writeFile: (targetDir: string, fileName: string, bytes: Uint8Array) => Promise<string>;
+  writeFile: (
+    targetDir: string,
+    fileName: string,
+    bytes: Uint8Array
+  ) => Promise<string | { fullPath: string; fileName: string }>;
   openExternal: (url: string) => Promise<void>;
   onShellLaunchArgs: (callback: (payload: DesktopLaunchPayload) => void) => () => void;
   signalReady: () => void;
@@ -84,6 +88,8 @@ export function desktopResultToFile(item: DesktopReadFileResult): File {
     ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     : lower.endsWith('.png')
     ? 'image/png'
+    : lower.endsWith('.webp')
+    ? 'image/webp'
     : lower.endsWith('.jpg') || lower.endsWith('.jpeg')
     ? 'image/jpeg'
     : 'application/octet-stream';

@@ -157,7 +157,7 @@ export async function convertMixedBatchToSeparatePdfs(
     const outName =
       item.kind === 'pdf'
         ? `${stripExtension(item.name)}_normalizado.pdf`
-        : `${stripExtension(item.name)}.pdf`;
+        : `${stripExtension(item.name)}_a_pdf.pdf`;
 
     results.push({
       blob: new Blob([pdfBytes as Uint8Array<ArrayBuffer>], { type: 'application/pdf' }),

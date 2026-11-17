@@ -86,7 +86,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '"MultiSelectModel"="Player"',
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\04_ToWord\\command]',
-      `@="\\"${exe}\\" --auto-convert --format=docx --output-dir=source --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --mode=pdf-to-word --auto-convert --format=docx --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }
@@ -99,7 +99,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '"MultiSelectModel"="Player"',
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg\\command]',
-      `@="\\"${exe}\\" --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --mode=pdf-to-img --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }
@@ -119,7 +119,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '"MultiSelectModel"="Player"',
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.DocxMenu\\shell\\01_ToPdf\\command]',
-      `@="\\"${exe}\\" --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --mode=word-to-pdf --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.DocxMenu\\shell\\02_BatchSingle]',
       '"MUIVerb"="Convertir todos en un solo PDF"',
@@ -166,7 +166,7 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '"MultiSelectModel"="Player"',
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.ImageMenu\\shell\\01_ToPdf\\command]',
-      `@="\\"${exe}\\" --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
+      `@="\\"${exe}\\" --mode=img-to-pdf --auto-convert --format=pdf --output-dir=source --input=\\"%1\\""`,
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.ImageMenu\\shell\\02_BatchSingle]',
       '"MUIVerb"="Unir imágenes en un solo PDF"',
