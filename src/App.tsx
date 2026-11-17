@@ -236,7 +236,11 @@ export default function App() {
     }
   };
 
-  const addFilesToQueue = async (fileList: FileList | File[], replace = false): Promise<QueueFileItem[]> => {
+  const addFilesToQueue = async (
+    fileList: FileList | File[],
+    replace = false,
+    skipPreview = false
+  ): Promise<QueueFileItem[]> => {
     setErrorMessage(null);
     const incoming = Array.from(fileList);
     if (incoming.length === 0) return [];
@@ -252,6 +256,10 @@ export default function App() {
     }));
 
     setQueue((prev) => (replace ? newItems : [...prev, ...newItems]));
+
+    if (skipPreview) {
+      return newItems;
+    }
 
     // Inspect PDFs and images asynchronously without blocking UI
     for (const item of newItems) {
@@ -341,10 +349,17 @@ export default function App() {
     toolToRun: PdfToolId,
     itemsToProcess: QueueFileItem[],
     batchModeOverride?: BatchConvertMode,
-    imageFormatOverride?: ImageExportSettings['format']
+    imageFormatOverride?: ImageExportSettings['format'],
+    onProgressUpdate?: (state: ProgressState) => void,
+    onToolError?: (message: string) => void
   ): Promise<ProcessedOutput[]> => {
     if (itemsToProcess.length === 0) return [];
     setErrorMessage(null);
+
+    const reportProgress = (state: ProgressState) => {
+      setProgress(state);
+      onProgressUpdate?.(state);
+    };
 
     try {
       const started = performance.now();
@@ -385,7 +400,7 @@ export default function App() {
           throw new Error('Carga al menos un archivo PDF para comprimir.');
         }
         for (const item of pdfItems) {
-          const res = await compressPdf(item.file, compression, setProgress);
+          const res = await compressPdf(item.file, compression, reportProgress);
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -403,7 +418,7 @@ export default function App() {
           throw new Error('Se necesitan al menos 2 archivos PDF para unir.');
         }
         const totalInSize = pdfItems.reduce((acc, i) => acc + i.size, 0);
-        const res = await mergePdfs(pdfItems, mergeStripMetadata, mergeOutputName, setProgress);
+        const res = await mergePdfs(pdfItems, mergeStripMetadata, mergeOutputName, reportProgress);
         const out = await maybeEncrypt(
           res.blob,
           res.fileName,
@@ -425,7 +440,7 @@ export default function App() {
             batchOutputName,
             imageToPdf,
             wordSettings,
-            setProgress
+            reportProgress
           );
           const out = await maybeEncrypt(
             res.blob,
@@ -440,7 +455,7 @@ export default function App() {
             convertible,
             imageToPdf,
             wordSettings,
-            setProgress
+            reportProgress
           );
           for (const res of results) {
             const out = await maybeEncrypt(
@@ -462,7 +477,7 @@ export default function App() {
           ? { ...imageExport, format: imageFormatOverride }
           : imageExport;
         for (const item of pdfItems) {
-          const res = await pdfToImages(item.file, effectiveImgConfig, setProgress);
+          const res = await pdfToImages(item.file, effectiveImgConfig, reportProgress);
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -481,7 +496,7 @@ export default function App() {
         const res = await imagesToPdf(
           imgItems.map((i) => i.file),
           imageToPdf,
-          setProgress
+          reportProgress
         );
         const out = await maybeEncrypt(
           res.blob,
@@ -497,7 +512,7 @@ export default function App() {
           throw new Error('Carga un archivo PDF para convertir a Word (.docx).');
         }
         for (const item of pdfItems) {
-          const res = await pdfToDocx(item.file, wordSettings, setProgress);
+          const res = await pdfToDocx(item.file, wordSettings, reportProgress);
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -513,7 +528,7 @@ export default function App() {
           throw new Error('Carga un documento Word (.docx) para convertir a PDF.');
         }
         for (const item of docItems) {
-          const res = await docxToPdf(item.file, wordSettings, setProgress);
+          const res = await docxToPdf(item.file, wordSettings, reportProgress);
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -525,7 +540,7 @@ export default function App() {
         }
       } else if (toolToRun === 'vault') {
         for (const item of itemsToProcess) {
-          setProgress({
+          reportProgress({
             active: true,
             percent: 40,
             stage:
@@ -566,16 +581,16 @@ export default function App() {
             });
           }
         }
-        setProgress({ active: false, percent: 100, stage: 'Completado' });
+        reportProgress({ active: false, percent: 100, stage: 'Completado' });
       }
 
       setOutputs(createdOutputs);
       return createdOutputs;
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Ocurrió un error al procesar el archivo.';
       setProgress({ active: false, percent: 0, stage: '' });
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Ocurrió un error al procesar el archivo.'
-      );
+      setErrorMessage(msg);
+      onToolError?.(msg);
       return [];
     }
   };
@@ -647,7 +662,7 @@ export default function App() {
       }
 
       handleSelectTool(targetTool);
-      const items = await addFilesToQueue(files, true);
+      const items = await addFilesToQueue(files, true, autoRun);
 
       if (!autoRun) {
         await bridge.showMainWindow();
@@ -659,14 +674,43 @@ export default function App() {
         return;
       }
 
+      const sendBgProgress = (state: ProgressState) => {
+        bridge.reportBackgroundProgress({
+          percent: state.percent,
+          stage: state.stage,
+          currentPage: state.currentPage,
+          totalPages: state.totalPages,
+          fileCount: files.length,
+          detail: `Destino: ${payload.sourceDir}`,
+          status: 'active',
+        });
+      };
+
+      sendBgProgress({
+        active: true,
+        percent: 12,
+        stage: `Procesando ${files.length} archivo(s)...`,
+      });
+
+      let capturedError: string | null = null;
+
       const created = await executeToolWithItems(
         targetTool,
         items,
         batchOverride,
-        imgFormatOverride
+        imgFormatOverride,
+        sendBgProgress,
+        (msg) => {
+          capturedError = msg;
+        }
       );
 
       if (created.length > 0) {
+        sendBgProgress({
+          active: true,
+          percent: 97,
+          stage: `Guardando ${created.length} archivo(s) en la carpeta original...`,
+        });
         const savedNames: string[] = [];
         for (const out of created) {
           const bytes = new Uint8Array(await out.blob.arrayBuffer());
@@ -684,7 +728,9 @@ export default function App() {
         await bridge.completeBackgroundTask({
           ok: false,
           title: 'SPEED.PDF — No se pudo completar',
-          body: 'Verifica que los archivos seleccionados no estén dañados ni protegidos.',
+          body:
+            capturedError ||
+            'Verifica que los archivos seleccionados no estén dañados ni protegidos.',
         });
       }
     } catch (err) {
@@ -915,6 +961,25 @@ export default function App() {
                 <div className="text-xs text-slate-500 dark:text-slate-400 font-mono truncate">
                   Ejecutable: {shellStatus.exePath}
                 </div>
+
+                {(shellStatus.ffmpegPresent === false ||
+                  shellStatus.isTempExe ||
+                  shellStatus.registeredHealthy === false) && (
+                  <p className="text-xs text-amber-800 dark:text-amber-200 bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 rounded-lg px-3 py-2">
+                    {shellStatus.isTempExe
+                      ? 'SPEED.PDF se ejecutó desde la carpeta temporal (Temp). Usa el instalador SPEED.PDF-Setup o mueve SPEED.PDF-Portable a una carpeta fija antes de activar el menú.'
+                      : 'No se detectó ffmpeg.dll junto al ejecutable registrado. Si Windows mostró error de ffmpeg.dll, reinstala SPEED.PDF-Setup o restaura el archivo desde Protección contra virus y amenazas en Seguridad de Windows.'}
+                  </p>
+                )}
+
+                {shellStatus.isPortable &&
+                  !shellStatus.isTempExe &&
+                  !/speed\.pdf\.exe$/i.test(shellStatus.exePath) && (
+                    <p className="text-xs text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-800/70 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-2">
+                      Estás usando la versión Portable. Para unir varios archivos a la vez desde el menú contextual sin re-extraer en Temp (y evitar bloqueos de ffmpeg.dll), se recomienda instalar <strong>SPEED.PDF-Setup</strong>.
+                    </p>
+                  )}
+
                 <div className="flex flex-wrap items-center gap-2">
                   <button
                     type="button"
@@ -925,7 +990,7 @@ export default function App() {
                     <CheckCircle2 className="w-3.5 h-3.5" />
                     <span>
                       {shellStatus.integrated
-                        ? 'Actualizar menú en Windows'
+                        ? 'Actualizar / Reparar menú en Windows'
                         : 'Activar menú en Windows'}
                     </span>
                   </button>

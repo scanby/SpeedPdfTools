@@ -22,6 +22,14 @@ contextBridge.exposeInMainWorld('speedPdfDesktop', {
   },
   signalReady: () => ipcRenderer.send('speedpdf:renderer-ready'),
   showMainWindow: () => ipcRenderer.invoke('speedpdf:show-main-window'),
+  reportBackgroundProgress: (progress) =>
+    ipcRenderer.send('speedpdf:background-progress', progress),
+  onBackgroundProgress: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on('speedpdf:progress-ui', handler);
+    return () => ipcRenderer.removeListener('speedpdf:progress-ui', handler);
+  },
+  cancelBackgroundTask: () => ipcRenderer.invoke('speedpdf:cancel-background'),
   completeBackgroundTask: (info) => ipcRenderer.invoke('speedpdf:background-complete', info),
   getShellStatus: () => ipcRenderer.invoke('speedpdf:get-shell-status'),
   installShellMenu: () => ipcRenderer.invoke('speedpdf:install-shell-menu'),

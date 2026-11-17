@@ -4,6 +4,7 @@ const fs = require('fs');
 const fsp = fs.promises;
 const http = require('http');
 const https = require('https');
+const os = require('os');
 const path = require('path');
 
 // Evita pantallas negras por incompatibilidad de aceleración GPU (D3D/ANGLE) en Windows 7–11 y ejecutables Portables
@@ -42,11 +43,285 @@ const MIME_TYPES = {
 const UTF8_TEXT_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg']);
 
 let mainWindow = null;
+let progressWindow = null;
+let lastProgressPayload = {
+  percent: 8,
+  stage: 'Iniciando procesamiento local...',
+  detail: 'Cargando motor PDF en segundo plano',
+  status: 'active',
+};
 let rendererIsReady = false;
 let launchedHeadlessForCli = false;
 let pendingLaunchPayload = null;
 let launchBatch = null;
 let launchBatchTimer = null;
+let headlessQuitTimer = null;
+
+function buildProgressWindowHtml() {
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>SPEED.PDF — Procesando</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a;
+    color: #f8fafc;
+    user-select: none;
+  }
+  .shell {
+    width: 100%;
+    height: 100%;
+    border: 1px solid #1e293b;
+    padding: 16px 18px 14px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    background: #0f172a;
+  }
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    -webkit-app-region: drag;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+  }
+  .logo {
+    width: 24px;
+    height: 24px;
+    border-radius: 6px;
+    background: #2563eb;
+    color: #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    letter-spacing: -0.02em;
+    flex-shrink: 0;
+  }
+  .brand-title {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: #f8fafc;
+  }
+  .badge {
+    font-size: 11px;
+    font-weight: 600;
+    color: #93c5fd;
+    background: rgba(37, 99, 235, 0.16);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    padding: 2px 8px;
+    border-radius: 5px;
+  }
+  .badge.done {
+    color: #6ee7b7;
+    background: rgba(16, 185, 129, 0.16);
+    border-color: rgba(16, 185, 129, 0.38);
+  }
+  .badge.error {
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.16);
+    border-color: rgba(239, 68, 68, 0.38);
+  }
+  .close-btn {
+    -webkit-app-region: no-drag;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #cbd5e1;
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .close-btn:hover {
+    background: #334155;
+    color: #ffffff;
+  }
+  .body {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .stage-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .stage {
+    font-size: 13px;
+    font-weight: 600;
+    color: #e2e8f0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .pct {
+    font-size: 13px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    color: #60a5fa;
+    flex-shrink: 0;
+  }
+  .pct.done { color: #34d399; }
+  .pct.error { color: #f87171; }
+  .track {
+    width: 100%;
+    height: 9px;
+    border-radius: 999px;
+    background: #1e293b;
+    overflow: hidden;
+    border: 1px solid #334155;
+  }
+  .fill {
+    height: 100%;
+    width: 8%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #2563eb 0%, #38bdf8 100%);
+    transition: width 180ms ease-out, background 180ms ease-out;
+  }
+  .fill.done {
+    background: linear-gradient(90deg, #059669 0%, #34d399 100%);
+  }
+  .fill.error {
+    background: linear-gradient(90deg, #dc2626 0%, #f87171 100%);
+  }
+  .detail {
+    font-size: 11.5px;
+    color: #94a3b8;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .footer {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .detail.error {
+    color: #fecaca;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.4;
+    max-height: 68px;
+    overflow-y: auto;
+  }
+  .manual-close-btn {
+    -webkit-app-region: no-drag;
+    display: none;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    background: rgba(220, 38, 38, 0.2);
+    color: #fecaca;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .manual-close-btn:hover {
+    background: rgba(220, 38, 38, 0.35);
+    color: #ffffff;
+  }
+  .manual-close-btn.visible {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div class="header">
+      <div class="brand">
+        <div class="logo">S</div>
+        <span class="brand-title">SPEED.PDF</span>
+        <span id="badge" class="badge">Procesando</span>
+      </div>
+      <button id="closeBtn" class="close-btn" type="button" title="Cancelar y cerrar">&times;</button>
+    </div>
+
+    <div class="body">
+      <div class="stage-row">
+        <div id="stage" class="stage">Iniciando procesamiento local...</div>
+        <div id="pct" class="pct">8%</div>
+      </div>
+      <div class="track">
+        <div id="fill" class="fill"></div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div id="detail" class="detail">Preparando archivos en tu dispositivo...</div>
+      <button id="manualCloseBtn" class="manual-close-btn" type="button">Cerrar</button>
+    </div>
+  </div>
+
+  <script>
+    const stageEl = document.getElementById('stage');
+    const pctEl = document.getElementById('pct');
+    const fillEl = document.getElementById('fill');
+    const detailEl = document.getElementById('detail');
+    const badgeEl = document.getElementById('badge');
+    const closeBtn = document.getElementById('closeBtn');
+    const manualCloseBtn = document.getElementById('manualCloseBtn');
+
+    function applyState(data) {
+      if (!data) return;
+      const pct = Math.max(0, Math.min(100, Math.round(Number(data.percent || 0))));
+      const status = data.status || 'active';
+
+      stageEl.textContent = data.stage || 'Procesando...';
+      pctEl.textContent = status === 'error' ? 'Error' : pct + '%';
+      fillEl.style.width = pct + '%';
+
+      if (data.detail) {
+        detailEl.textContent = data.detail;
+      } else if (data.currentPage && data.totalPages) {
+        detailEl.textContent = 'Elemento ' + data.currentPage + ' de ' + data.totalPages;
+      } else if (data.fileCount) {
+        detailEl.textContent = data.fileCount + ' archivo(s) en proceso local';
+      }
+
+      fillEl.className = status === 'done' ? 'fill done' : status === 'error' ? 'fill error' : 'fill';
+      pctEl.className = status === 'done' ? 'pct done' : status === 'error' ? 'pct error' : 'pct';
+      badgeEl.className = status === 'done' ? 'badge done' : status === 'error' ? 'badge error' : 'badge';
+      badgeEl.textContent = status === 'done' ? 'Completado' : status === 'error' ? 'Error' : 'Procesando';
+      detailEl.className = status === 'error' ? 'detail error' : 'detail';
+      manualCloseBtn.className = status === 'error' ? 'manual-close-btn visible' : 'manual-close-btn';
+    }
+
+    if (window.speedPdfDesktop) {
+      window.speedPdfDesktop.onBackgroundProgress(applyState);
+      const triggerClose = () => window.speedPdfDesktop.cancelBackgroundTask();
+      closeBtn.addEventListener('click', triggerClose);
+      manualCloseBtn.addEventListener('click', triggerClose);
+    }
+  </script>
+</body>
+</html>`;
+}
 
 function registerAppProtocol() {
   const rendererRoot = path.resolve(__dirname, 'renderer');
@@ -56,6 +331,16 @@ function registerAppProtocol() {
       const parsed = new URL(request.url);
       let relPath = decodeURIComponent(parsed.pathname || '/index.html').replace(/^\/+/, '');
       if (!relPath) relPath = 'index.html';
+
+      if (relPath === '__progress.html') {
+        callback({
+          statusCode: 200,
+          mimeType: 'text/html',
+          charset: 'utf-8',
+          data: Buffer.from(buildProgressWindowHtml(), 'utf8'),
+        });
+        return;
+      }
 
       let targetPath = path.resolve(rendererRoot, relPath);
       const relFromRoot = path.relative(rendererRoot, targetPath);
@@ -146,8 +431,86 @@ function parseCliArgs(argv) {
   };
 }
 
+function closeProgressWindow() {
+  if (progressWindow && !progressWindow.isDestroyed()) {
+    progressWindow.close();
+  }
+  progressWindow = null;
+}
+
+function updateProgressWindow(payload) {
+  lastProgressPayload = {
+    ...lastProgressPayload,
+    ...payload,
+  };
+  if (!progressWindow || progressWindow.isDestroyed()) return;
+  const pct = Math.max(0, Math.min(100, Number(lastProgressPayload.percent || 0)));
+  if (lastProgressPayload.status === 'error') {
+    const [, currentHeight] = progressWindow.getSize();
+    if (currentHeight < 228) {
+      progressWindow.setSize(460, 228);
+      progressWindow.center();
+    }
+    progressWindow.setProgressBar(1, { mode: 'error' });
+  } else if (lastProgressPayload.status === 'done') {
+    progressWindow.setProgressBar(1, { mode: 'normal' });
+  } else {
+    progressWindow.setProgressBar(pct > 0 ? pct / 100 : -1);
+  }
+  progressWindow.webContents.send('speedpdf:progress-ui', lastProgressPayload);
+}
+
+function createProgressWindow(initialState) {
+  if (initialState) {
+    lastProgressPayload = {
+      ...lastProgressPayload,
+      ...initialState,
+    };
+  }
+  if (progressWindow && !progressWindow.isDestroyed()) {
+    updateProgressWindow(lastProgressPayload);
+    if (!progressWindow.isVisible()) progressWindow.show();
+    progressWindow.focus();
+    return;
+  }
+
+  progressWindow = new BrowserWindow({
+    width: 460,
+    height: 186,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    minimizable: true,
+    alwaysOnTop: true,
+    center: true,
+    show: true,
+    title: 'SPEED.PDF — Procesando',
+    backgroundColor: '#0f172a',
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+
+  progressWindow.loadURL('app://speedpdf/__progress.html');
+
+  progressWindow.webContents.on('did-finish-load', () => {
+    updateProgressWindow(lastProgressPayload);
+  });
+
+  progressWindow.on('closed', () => {
+    progressWindow = null;
+    if (launchedHeadlessForCli && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
+      app.quit();
+    }
+  });
+}
+
 function revealMainWindow() {
   launchedHeadlessForCli = false;
+  closeProgressWindow();
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
@@ -168,6 +531,17 @@ function flushLaunchBatch() {
   const payload = launchBatch;
   launchBatch = null;
 
+  if (payload.autoConvert && !payload.customUi && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
+    launchedHeadlessForCli = true;
+    createProgressWindow({
+      percent: 10,
+      stage: `Procesando ${payload.files.length} archivo(s)...`,
+      detail: `Carpeta: ${payload.sourceDir}`,
+      fileCount: payload.files.length,
+      status: 'active',
+    });
+  }
+
   if (mainWindow && !mainWindow.isDestroyed() && rendererIsReady) {
     deliverPayloadToRenderer(payload);
   } else {
@@ -177,6 +551,11 @@ function flushLaunchBatch() {
 
 function enqueueLaunchPayload(payload) {
   if (!payload) return;
+
+  if (headlessQuitTimer) {
+    clearTimeout(headlessQuitTimer);
+    headlessQuitTimer = null;
+  }
 
   if (
     launchBatch &&
@@ -198,14 +577,84 @@ function enqueueLaunchPayload(payload) {
     };
   }
 
+  if (launchBatch && launchBatch.autoConvert && !launchBatch.customUi) {
+    updateProgressWindow({
+      percent: 8,
+      stage: `Reuniendo ${launchBatch.files.length} archivo(s)...`,
+      detail: `Destino: ${launchBatch.sourceDir}`,
+      fileCount: launchBatch.files.length,
+      status: 'active',
+    });
+  }
+
   if (launchBatchTimer) {
     clearTimeout(launchBatchTimer);
   }
-  launchBatchTimer = setTimeout(flushLaunchBatch, 300);
+  const batchWindowMs = process.env.PORTABLE_EXECUTABLE_FILE ? 900 : 550;
+  launchBatchTimer = setTimeout(flushLaunchBatch, batchWindowMs);
+}
+
+function isTempExecutablePath(targetPath) {
+  if (!targetPath) return true;
+  const normalized = path.resolve(targetPath).toLowerCase();
+  const candidates = [os.tmpdir()];
+  try {
+    candidates.push(app.getPath('temp'));
+  } catch {
+    // ignore before app ready
+  }
+  for (const tempRoot of candidates) {
+    if (!tempRoot) continue;
+    const normTemp = path.resolve(tempRoot).toLowerCase();
+    if (normalized === normTemp || normalized.startsWith(`${normTemp}${path.sep}`)) {
+      return true;
+    }
+  }
+  return /[\\/]appdata[\\/]local[\\/]temp[\\/]/i.test(normalized);
+}
+
+function hasValidRuntimeForExe(exePath) {
+  if (!exePath || !fs.existsSync(exePath)) return false;
+  if (path.basename(exePath).toLowerCase() === 'speed.pdf.exe') {
+    return fs.existsSync(path.join(path.dirname(exePath), 'ffmpeg.dll'));
+  }
+  return true;
+}
+
+function findInstalledSpeedPdfExe() {
+  const candidates = [];
+  if (process.env.LOCALAPPDATA) {
+    candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'SPEED.PDF', 'SPEED.PDF.exe'));
+  }
+  if (process.env.ProgramFiles) {
+    candidates.push(path.join(process.env.ProgramFiles, 'SPEED.PDF', 'SPEED.PDF.exe'));
+  }
+  for (const candidate of candidates) {
+    if (hasValidRuntimeForExe(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function getDesktopExePath() {
-  return process.env.PORTABLE_EXECUTABLE_FILE || process.execPath;
+  const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
+  if (portableExe) {
+    const installed = findInstalledSpeedPdfExe();
+    if (installed) return installed;
+    return portableExe;
+  }
+  return process.execPath;
+}
+
+function extractExeFromRegOutput(output) {
+  if (!output) return null;
+  const match = output.match(/REG_(?:SZ|EXPAND_SZ)\s+(.+)/i);
+  if (!match || !match[1]) return null;
+  let value = match[1].trim();
+  value = value.replace(/,\d+\s*$/, '').trim();
+  value = value.replace(/^"|"$/g, '').trim();
+  return value || null;
 }
 
 function escapeRegPath(value) {
@@ -423,35 +872,123 @@ async function importRegContent(content) {
 
 async function getWindowsShellStatus() {
   const exePath = getDesktopExePath();
+  const isPortable = Boolean(process.env.PORTABLE_EXECUTABLE_FILE);
+  const ffmpegPresent = fs.existsSync(path.join(path.dirname(process.execPath), 'ffmpeg.dll'));
+  const isTempExe = isTempExecutablePath(exePath);
+
   if (process.platform !== 'win32') {
-    return { supported: false, integrated: false, exePath };
+    return {
+      supported: false,
+      integrated: false,
+      exePath,
+      isPortable,
+      isTempExe,
+      ffmpegPresent,
+    };
   }
   try {
-    await runRegCommand([
-      'query',
-      'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
-      '/v',
-      'ExtendedSubCommandsKey',
+    const [pdfOut] = await Promise.all([
+      runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
+        '/v',
+        'Icon',
+      ]),
+      runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\*\\shell\\SpeedPdfBatchMenu',
+        '/v',
+        'ExtendedSubCommandsKey',
+      ]),
     ]);
-    return { supported: true, integrated: true, exePath };
+    const registeredExe = extractExeFromRegOutput(pdfOut);
+    const registeredHealthy = Boolean(
+      registeredExe && !isTempExecutablePath(registeredExe) && hasValidRuntimeForExe(registeredExe)
+    );
+    return {
+      supported: true,
+      integrated: true,
+      exePath: registeredExe || exePath,
+      isPortable,
+      isTempExe,
+      ffmpegPresent,
+      registeredHealthy,
+    };
   } catch {
-    return { supported: true, integrated: false, exePath };
+    return {
+      supported: true,
+      integrated: false,
+      exePath,
+      isPortable,
+      isTempExe,
+      ffmpegPresent,
+      registeredHealthy: hasValidRuntimeForExe(exePath) && !isTempExe,
+    };
   }
 }
 
-// Mantiene sincronizada la ruta del ejecutable si el usuario actualizó la versión Portable
+// Mantiene sincronizada la ruta del ejecutable y repara rutas temporales (%TEMP%) o dañadas
 async function refreshShellMenuIfOutdated() {
   if (process.platform !== 'win32' || !app.isPackaged) return;
   try {
-    const out = await runRegCommand([
+    const pdfOut = await runRegCommand([
       'query',
       'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
       '/v',
       'Icon',
     ]);
-    const exePath = getDesktopExePath();
-    if (!out.toLowerCase().includes(exePath.toLowerCase())) {
-      await importRegContent(buildInstallRegContent(exePath));
+    let batchOut = '';
+    try {
+      batchOut = await runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\*\\shell\\SpeedPdfBatchMenu',
+        '/v',
+        'Icon',
+      ]);
+    } catch {
+      batchOut = '';
+    }
+
+    const registeredPdfExe = extractExeFromRegOutput(pdfOut);
+    const registeredBatchExe = extractExeFromRegOutput(batchOut);
+    const preferredExe = getDesktopExePath();
+
+    if (isTempExecutablePath(preferredExe) || !hasValidRuntimeForExe(preferredExe)) {
+      return;
+    }
+
+    const registeredIsHealthyInstalled = Boolean(
+      registeredPdfExe &&
+        !isTempExecutablePath(registeredPdfExe) &&
+        path.basename(registeredPdfExe).toLowerCase() === 'speed.pdf.exe' &&
+        hasValidRuntimeForExe(registeredPdfExe)
+    );
+
+    // No sobrescribir una instalación fija saludable cuando solo se abre la versión Portable
+    if (process.env.PORTABLE_EXECUTABLE_FILE && registeredIsHealthyInstalled) {
+      if (
+        !registeredBatchExe ||
+        registeredBatchExe.toLowerCase() !== registeredPdfExe.toLowerCase()
+      ) {
+        await importRegContent(buildInstallRegContent(registeredPdfExe));
+      }
+      return;
+    }
+
+    const pdfNeedsRepair =
+      !registeredPdfExe ||
+      isTempExecutablePath(registeredPdfExe) ||
+      !hasValidRuntimeForExe(registeredPdfExe) ||
+      registeredPdfExe.toLowerCase() !== preferredExe.toLowerCase();
+
+    const batchNeedsRepair =
+      !registeredBatchExe ||
+      isTempExecutablePath(registeredBatchExe) ||
+      !hasValidRuntimeForExe(registeredBatchExe) ||
+      registeredBatchExe.toLowerCase() !== preferredExe.toLowerCase();
+
+    if (pdfNeedsRepair || batchNeedsRepair) {
+      await importRegContent(buildInstallRegContent(preferredExe));
     }
   } catch {
     // El menú contextual aún no está activado por el usuario
@@ -617,6 +1154,15 @@ if (!gotSingleInstanceLock) {
     launchedHeadlessForCli = startHidden;
 
     if (initialPayload) {
+      if (startHidden) {
+        createProgressWindow({
+          percent: 6,
+          stage: 'Iniciando procesamiento en segundo plano...',
+          detail: `Carpeta: ${initialPayload.sourceDir}`,
+          fileCount: initialPayload.files.length,
+          status: 'active',
+        });
+      }
       enqueueLaunchPayload(initialPayload);
     }
     createMainWindow(startHidden);
@@ -648,18 +1194,76 @@ ipcMain.handle('speedpdf:show-main-window', () => {
   revealMainWindow();
 });
 
+ipcMain.on('speedpdf:background-progress', (_event, progress) => {
+  if (!progress) return;
+  if (launchedHeadlessForCli && (!progressWindow || progressWindow.isDestroyed())) {
+    createProgressWindow();
+  }
+  updateProgressWindow({
+    percent: Number(progress.percent || 0),
+    stage: progress.stage || 'Procesando...',
+    detail: progress.detail,
+    currentPage: progress.currentPage,
+    totalPages: progress.totalPages,
+    fileCount: progress.fileCount,
+    status: progress.status || 'active',
+  });
+});
+
+ipcMain.handle('speedpdf:cancel-background', () => {
+  const shouldQuitApp =
+    launchedHeadlessForCli || !mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible();
+  launchedHeadlessForCli = false;
+  if (headlessQuitTimer) {
+    clearTimeout(headlessQuitTimer);
+    headlessQuitTimer = null;
+  }
+  closeProgressWindow();
+  if (shouldQuitApp) {
+    app.quit();
+  }
+});
+
 ipcMain.handle('speedpdf:background-complete', (_event, info) => {
+  const ok = !info || info.ok !== false;
   const title = (info && info.title) || 'SPEED.PDF';
   const body = (info && info.body) || 'Operación completada.';
+
+  if (launchedHeadlessForCli && (!progressWindow || progressWindow.isDestroyed())) {
+    createProgressWindow();
+  }
+
+  updateProgressWindow({
+    percent: 100,
+    stage: ok ? '¡Proceso completado!' : title,
+    detail: body,
+    status: ok ? 'done' : 'error',
+  });
 
   if (Notification.isSupported()) {
     new Notification({ title, body }).show();
   }
 
+  if (!ok) {
+    // En caso de error no se cierra automáticamente; el usuario la cierra manualmente
+    if (headlessQuitTimer) {
+      clearTimeout(headlessQuitTimer);
+      headlessQuitTimer = null;
+    }
+    return;
+  }
+
   if (launchedHeadlessForCli) {
-    setTimeout(() => {
+    if (headlessQuitTimer) clearTimeout(headlessQuitTimer);
+    headlessQuitTimer = setTimeout(() => {
+      launchedHeadlessForCli = false;
+      closeProgressWindow();
       app.quit();
-    }, 1200);
+    }, 1100);
+  } else {
+    setTimeout(() => {
+      closeProgressWindow();
+    }, 1100);
   }
 });
 
@@ -702,6 +1306,16 @@ ipcMain.handle('speedpdf:install-shell-menu', async () => {
     return getWindowsShellStatus();
   }
   const exePath = getDesktopExePath();
+  if (isTempExecutablePath(exePath)) {
+    throw new Error(
+      'No se puede registrar SPEED.PDF desde la carpeta temporal (Temp). Mueve el ejecutable a una carpeta fija o utiliza SPEED.PDF-Setup.'
+    );
+  }
+  if (!hasValidRuntimeForExe(exePath)) {
+    throw new Error(
+      'Falta ffmpeg.dll junto al ejecutable. Reinstala SPEED.PDF-Setup o revisa si Windows Defender bloqueó ffmpeg.dll.'
+    );
+  }
   await importRegContent(buildInstallRegContent(exePath));
   return getWindowsShellStatus();
 });
@@ -745,15 +1359,35 @@ ipcMain.handle('speedpdf:install-update', async (_event, { downloadUrl, fileName
     const scriptPath = path.join(app.getPath('temp'), `speedpdf_updater_${Date.now()}.ps1`);
     let psLines;
 
+    const waitAndKillRunningAppLines = [
+      '$deadline = (Get-Date).AddSeconds(15)',
+      'while ((Get-Date) -lt $deadline) {',
+      "  $procs = Get-Process -Name 'SPEED.PDF' -ErrorAction SilentlyContinue",
+      '  if (-not $procs) { break }',
+      '  if ((Get-Date) -gt $deadline.AddSeconds(-10)) {',
+      '    $procs | Stop-Process -Force -ErrorAction SilentlyContinue',
+      '  }',
+      '  Start-Sleep -Milliseconds 400',
+      '}',
+      'Start-Sleep -Milliseconds 700',
+    ];
+
     if (portableExe && /portable/i.test(safeName)) {
       const targetDir = path.dirname(portableExe);
       const nextPortablePath = path.join(targetDir, safeName);
       psLines = [
-        'Start-Sleep -Seconds 2',
+        ...waitAndKillRunningAppLines,
         `$src = '${escapePsSingleQuoted(tempDownloadPath)}'`,
         `$dst = '${escapePsSingleQuoted(nextPortablePath)}'`,
         `$old = '${escapePsSingleQuoted(portableExe)}'`,
-        'Copy-Item -LiteralPath $src -Destination $dst -Force',
+        'for ($i = 0; $i -lt 10; $i++) {',
+        '  try {',
+        '    Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop',
+        '    break',
+        '  } catch {',
+        '    Start-Sleep -Milliseconds 500',
+        '  }',
+        '}',
         'Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue',
         'if (($dst -ne $old) -and (Test-Path -LiteralPath $dst) -and (Test-Path -LiteralPath $old)) {',
         '  Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue',
@@ -764,7 +1398,7 @@ ipcMain.handle('speedpdf:install-update', async (_event, { downloadUrl, fileName
     } else {
       const relaunchExe = portableExe || process.execPath;
       psLines = [
-        'Start-Sleep -Seconds 2',
+        ...waitAndKillRunningAppLines,
         `$inst = '${escapePsSingleQuoted(tempDownloadPath)}'`,
         `$app = '${escapePsSingleQuoted(relaunchExe)}'`,
         "Start-Process -FilePath $inst -ArgumentList '/S' -Wait",

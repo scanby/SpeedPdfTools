@@ -20,12 +20,26 @@ export interface DesktopShellStatus {
   supported: boolean;
   integrated: boolean;
   exePath: string;
+  isPortable?: boolean;
+  isTempExe?: boolean;
+  ffmpegPresent?: boolean;
+  registeredHealthy?: boolean;
 }
 
 export interface DesktopUpdateProgress {
   stage: 'downloading' | 'installing' | 'error';
   percent: number;
   message: string;
+}
+
+export interface BackgroundProgressPayload {
+  percent: number;
+  stage: string;
+  detail?: string;
+  currentPage?: number;
+  totalPages?: number;
+  fileCount?: number;
+  status?: 'active' | 'done' | 'error';
 }
 
 export interface SpeedPdfDesktopApi {
@@ -38,6 +52,7 @@ export interface SpeedPdfDesktopApi {
   onShellLaunchArgs: (callback: (payload: DesktopLaunchPayload) => void) => () => void;
   signalReady: () => void;
   showMainWindow: () => Promise<void>;
+  reportBackgroundProgress: (progress: BackgroundProgressPayload) => void;
   completeBackgroundTask: (info: { ok: boolean; title: string; body: string }) => Promise<void>;
   getShellStatus: () => Promise<DesktopShellStatus>;
   installShellMenu: () => Promise<DesktopShellStatus>;
