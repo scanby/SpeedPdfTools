@@ -3,12 +3,16 @@ export type AppSection = 'workspace' | 'converter';
 export type PdfToolId =
   | 'compress'
   | 'merge'
+  | 'organize'
+  | 'rotate'
   | 'batch-to-pdf'
   | 'pdf-to-img'
   | 'img-to-pdf'
   | 'pdf-to-word'
   | 'word-to-pdf'
   | 'vault';
+
+export type RotationAngle = 0 | 90 | 180 | 270;
 
 export type BatchConvertMode = 'single-pdf' | 'separate-pdfs';
 
@@ -27,8 +31,28 @@ export interface QueueFileItem {
   kind: 'pdf' | 'image' | 'docx' | 'vault';
   pageCount?: number;
   pageRange: string;
+  rotation?: RotationAngle;
   thumbnailUrl?: string;
   addedAt: number;
+}
+
+export interface OrganizerSourceFile {
+  id: string;
+  file: File;
+  name: string;
+  size: number;
+  pageCount: number;
+  colorIndex: number;
+}
+
+export interface OrganizerPageItem {
+  id: string;
+  sourceFileId: string;
+  sourceFileName: string;
+  colorIndex: number;
+  originalPageNumber: number;
+  rotation: RotationAngle;
+  thumbnailUrl?: string;
 }
 
 export interface CompressionSettings {

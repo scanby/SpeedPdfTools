@@ -1,6 +1,7 @@
 import { CheckCircle2, Download, FolderCog, Trash2, X } from 'lucide-react';
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { FileQueuePanel } from './components/FileQueuePanel';
+import { OrganizePagesGrid } from './components/OrganizePagesGrid';
 import { OutputPanel } from './components/OutputPanel';
 import { ToolSettingsPanel } from './components/ToolSettingsPanel';
 import { TopBar } from './components/TopBar';
@@ -24,12 +25,16 @@ import {
   triggerBlobDownload,
 } from './core/formatters';
 import {
+  assembleOrganizedPdf,
   compressPdf,
+  getPdfPageCount,
   imagesToPdf,
   inspectImageFile,
   inspectPdfFile,
   mergePdfs,
   pdfToImages,
+  renderPdfAllPageThumbnails,
+  rotatePdf,
 } from './core/pdfEngine';
 import {
   createSampleDocxFile,
@@ -46,10 +51,13 @@ import {
   CompressionSettings,
   ImageExportSettings,
   ImageToPdfSettings,
+  OrganizerPageItem,
+  OrganizerSourceFile,
   PdfToolId,
   ProcessedOutput,
   ProgressState,
   QueueFileItem,
+  RotationAngle,
   WordConversionSettings,
 } from './types/speedpdf';
 
@@ -67,8 +75,22 @@ const TOOL_METADATA: Record<
   merge: {
     title: 'Unir múltiples PDFs',
     description:
-      'Combina documentos en un único PDF, ajusta su orden de lectura y selecciona rangos de páginas específicos.',
+      'Combina documentos en un único PDF, arrastra las tarjetas para definir su orden y gira páginas si lo necesitas.',
     acceptedHint: '2 o más archivos PDF (.pdf)',
+    acceptAttr: '.pdf,application/pdf',
+  },
+  organize: {
+    title: 'Ordenar y mezclar páginas PDF',
+    description:
+      'Agrupa las páginas de cada PDF por color en cuadrícula, enumera cada página por archivo, gira 90°, elimina o mezcla páginas libremente.',
+    acceptedHint: 'Uno o más archivos PDF (.pdf)',
+    acceptAttr: '.pdf,application/pdf',
+  },
+  rotate: {
+    title: 'Girar PDF 90° localmente',
+    description:
+      'Corrige la orientación de archivos cuyo contenido quedó girado o invertido respecto al documento (90°, 180° o 270°) sin perder calidad.',
+    acceptedHint: 'Archivos PDF (.pdf)',
     acceptAttr: '.pdf,application/pdf',
   },
   'batch-to-pdf': {
@@ -153,6 +175,12 @@ export default function App() {
 
   const [mergeOutputName, setMergeOutputName] = useState('documento_unificado');
   const [mergeStripMetadata, setMergeStripMetadata] = useState(true);
+  const [organizeOutputName, setOrganizeOutputName] = useState('documento_ordenado');
+  const [organizeStripMetadata, setOrganizeStripMetadata] = useState(true);
+  const [organizerFiles, setOrganizerFiles] = useState<OrganizerSourceFile[]>([]);
+  const [organizerPages, setOrganizerPages] = useState<OrganizerPageItem[]>([]);
+  const [organizerLoadingCount, setOrganizerLoadingCount] = useState(0);
+  const [rotateStripMetadata, setRotateStripMetadata] = useState(true);
 
   const [imageExport, setImageExport] = useState<ImageExportSettings>({
     format: 'jpeg',
@@ -186,6 +214,9 @@ export default function App() {
   const [shellFeedback, setShellFeedback] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const organizerSessionRef = useRef(0);
+  const organizerColorCounterRef = useRef(0);
+  const organizerThumbCacheRef = useRef<Map<string, Record<number, string>>>(new Map());
 
   useEffect(() => {
     const root = document.documentElement;
@@ -210,9 +241,103 @@ export default function App() {
     };
   }, []);
 
+  const addPdfFilesToOrganizer = async (fileList: FileList | File[], replace = false) => {
+    setErrorMessage(null);
+    const incoming = Array.from(fileList);
+    const pdfFiles = incoming.filter((f) => detectFileKind(f) === 'pdf');
+    if (pdfFiles.length === 0) {
+      if (incoming.length > 0) {
+        setErrorMessage('Solo se admiten archivos PDF (.pdf) en el módulo Ordenar PDF.');
+      }
+      return;
+    }
+    if (pdfFiles.length < incoming.length) {
+      setErrorMessage('Algunos archivos no eran PDF y fueron omitidos en el organizador.');
+    }
+
+    if (replace) {
+      organizerSessionRef.current += 1;
+      organizerColorCounterRef.current = 0;
+      organizerThumbCacheRef.current.clear();
+      setOrganizerFiles([]);
+      setOrganizerPages([]);
+      setOutputs([]);
+    }
+
+    const sessionId = organizerSessionRef.current;
+
+    for (const file of pdfFiles) {
+      if (sessionId !== organizerSessionRef.current) return;
+      try {
+        const pageCount = await getPdfPageCount(file);
+        if (sessionId !== organizerSessionRef.current) return;
+        if (pageCount <= 0) continue;
+
+        const sourceFileId = crypto.randomUUID();
+        const colorIndex = organizerColorCounterRef.current++;
+
+        const newSourceFile: OrganizerSourceFile = {
+          id: sourceFileId,
+          file,
+          name: file.name,
+          size: file.size,
+          pageCount,
+          colorIndex,
+        };
+
+        const newPages: OrganizerPageItem[] = Array.from({ length: pageCount }, (_, i) => ({
+          id: crypto.randomUUID(),
+          sourceFileId,
+          sourceFileName: file.name,
+          colorIndex,
+          originalPageNumber: i + 1,
+          rotation: 0,
+        }));
+
+        setOrganizerFiles((prev) => [...prev, newSourceFile]);
+        setOrganizerPages((prev) => [...prev, ...newPages]);
+
+        setOrganizerLoadingCount((c) => c + 1);
+        void renderPdfAllPageThumbnails(
+          file,
+          (pageNum, thumbnailUrl) => {
+            if (sessionId !== organizerSessionRef.current) return;
+            const cache = organizerThumbCacheRef.current.get(sourceFileId) ?? {};
+            cache[pageNum] = thumbnailUrl;
+            organizerThumbCacheRef.current.set(sourceFileId, cache);
+
+            setOrganizerPages((prev) =>
+              prev.map((p) =>
+                p.sourceFileId === sourceFileId && p.originalPageNumber === pageNum
+                  ? { ...p, thumbnailUrl }
+                  : p
+              )
+            );
+          },
+          () => sessionId !== organizerSessionRef.current
+        )
+          .catch(() => {
+            // Keep page cards functional even if a thumbnail fails to render
+          })
+          .finally(() => {
+            setOrganizerLoadingCount((c) => Math.max(0, c - 1));
+          });
+      } catch (err) {
+        setErrorMessage(
+          err instanceof Error
+            ? `No se pudo abrir ${file.name}: ${err.message}`
+            : `No se pudo leer el archivo PDF ${file.name}.`
+        );
+      }
+    }
+  };
+
   const handleSelectSection = (section: AppSection) => {
     setActiveSection(section);
-    if (section === 'workspace' && !['compress', 'merge', 'vault'].includes(activeTool)) {
+    if (
+      section === 'workspace' &&
+      !['compress', 'merge', 'organize', 'rotate', 'vault'].includes(activeTool)
+    ) {
       setActiveTool('compress');
     } else if (
       section === 'converter' &&
@@ -229,10 +354,16 @@ export default function App() {
     setErrorMessage(null);
     setContextBanner(null);
     setOutputs([]);
-    if (['compress', 'merge', 'vault'].includes(tool)) {
+    if (['compress', 'merge', 'organize', 'rotate', 'vault'].includes(tool)) {
       setActiveSection('workspace');
     } else {
       setActiveSection('converter');
+    }
+    if (tool === 'organize' && organizerFiles.length === 0) {
+      const queuedPdfs = queue.filter((q) => q.kind === 'pdf').map((q) => q.file);
+      if (queuedPdfs.length > 0) {
+        void addPdfFilesToOrganizer(queuedPdfs, true);
+      }
     }
   };
 
@@ -252,6 +383,7 @@ export default function App() {
       size: file.size,
       kind: detectFileKind(file),
       pageRange: 'Todas',
+      rotation: 0,
       addedAt: Date.now(),
     }));
 
@@ -289,7 +421,11 @@ export default function App() {
 
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      void addFilesToQueue(e.target.files);
+      if (activeTool === 'organize') {
+        void addPdfFilesToOrganizer(e.target.files);
+      } else {
+        void addFilesToQueue(e.target.files);
+      }
       e.target.value = '';
     }
   };
@@ -304,26 +440,159 @@ export default function App() {
     });
   };
 
-  const handleMoveItem = (id: string, direction: 'up' | 'down') => {
+  const handleReorderItem = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
     setQueue((prev) => {
-      const idx = prev.findIndex((i) => i.id === id);
-      if (idx < 0) return prev;
-      const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
-      if (swapIdx < 0 || swapIdx >= prev.length) return prev;
+      const fromIdx = prev.findIndex((i) => i.id === fromId);
+      const toIdx = prev.findIndex((i) => i.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return prev;
       const copy = [...prev];
-      const [moved] = copy.splice(idx, 1);
-      copy.splice(swapIdx, 0, moved);
+      const [moved] = copy.splice(fromIdx, 1);
+      copy.splice(toIdx, 0, moved);
       return copy;
     });
+  };
+
+  const handleRotateItem = (id: string, deltaDegrees = 90) => {
+    setQueue((prev) =>
+      prev.map((item) => {
+        if (item.id !== id) return item;
+        const next = ((((item.rotation ?? 0) + deltaDegrees) % 360) + 360) % 360;
+        return { ...item, rotation: next as RotationAngle };
+      })
+    );
+  };
+
+  const handleRotateAll = (deltaDegrees: number) => {
+    setQueue((prev) =>
+      prev.map((item) => {
+        if (item.kind !== 'pdf' && item.kind !== 'image') return item;
+        const next = ((((item.rotation ?? 0) + deltaDegrees) % 360) + 360) % 360;
+        return { ...item, rotation: next as RotationAngle };
+      })
+    );
+  };
+
+  const handleResetRotations = () => {
+    setQueue((prev) => prev.map((item) => ({ ...item, rotation: 0 })));
   };
 
   const handleUpdatePageRange = (id: string, pageRange: string) => {
     setQueue((prev) => prev.map((item) => (item.id === id ? { ...item, pageRange } : item)));
   };
 
+  const handleReorderOrganizerPage = (fromId: string, toId: string) => {
+    if (fromId === toId) return;
+    setOrganizerPages((prev) => {
+      const fromIdx = prev.findIndex((p) => p.id === fromId);
+      const toIdx = prev.findIndex((p) => p.id === toId);
+      if (fromIdx < 0 || toIdx < 0) return prev;
+      const copy = [...prev];
+      const [moved] = copy.splice(fromIdx, 1);
+      copy.splice(toIdx, 0, moved);
+      return copy;
+    });
+  };
+
+  const handleMoveOrganizerPageStep = (id: string, delta: -1 | 1) => {
+    setOrganizerPages((prev) => {
+      const idx = prev.findIndex((p) => p.id === id);
+      const targetIdx = idx + delta;
+      if (idx < 0 || targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const copy = [...prev];
+      const [moved] = copy.splice(idx, 1);
+      copy.splice(targetIdx, 0, moved);
+      return copy;
+    });
+  };
+
+  const handleRotateOrganizerPage = (id: string, deltaDegrees = 90) => {
+    setOrganizerPages((prev) =>
+      prev.map((p) => {
+        if (p.id !== id) return p;
+        const next = ((((p.rotation ?? 0) + deltaDegrees) % 360) + 360) % 360;
+        return { ...p, rotation: next as RotationAngle };
+      })
+    );
+  };
+
+  const handleRotateOrganizerFilePages = (sourceFileId: string, deltaDegrees = 90) => {
+    setOrganizerPages((prev) =>
+      prev.map((p) => {
+        if (p.sourceFileId !== sourceFileId) return p;
+        const next = ((((p.rotation ?? 0) + deltaDegrees) % 360) + 360) % 360;
+        return { ...p, rotation: next as RotationAngle };
+      })
+    );
+  };
+
+  const handleRemoveOrganizerPage = (id: string) => {
+    setOrganizerPages((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  const handleRemoveOrganizerFile = (sourceFileId: string) => {
+    organizerThumbCacheRef.current.delete(sourceFileId);
+    setOrganizerPages((prev) => prev.filter((p) => p.sourceFileId !== sourceFileId));
+    setOrganizerFiles((prev) => {
+      const next = prev.filter((sf) => sf.id !== sourceFileId);
+      if (next.length === 0) {
+        organizerColorCounterRef.current = 0;
+      }
+      return next;
+    });
+  };
+
+  const handleGroupOrganizerByFile = () => {
+    const fileOrder = new Map<string, number>();
+    organizerFiles.forEach((sf, i) => fileOrder.set(sf.id, i));
+    setOrganizerPages((prev) =>
+      [...prev].sort((a, b) => {
+        const orderA = fileOrder.get(a.sourceFileId) ?? 9999;
+        const orderB = fileOrder.get(b.sourceFileId) ?? 9999;
+        if (orderA !== orderB) return orderA - orderB;
+        return a.originalPageNumber - b.originalPageNumber;
+      })
+    );
+  };
+
+  const handleResetOrganizerPages = () => {
+    const rebuilt: OrganizerPageItem[] = [];
+    for (const sf of organizerFiles) {
+      const cache = organizerThumbCacheRef.current.get(sf.id) ?? {};
+      for (let pageNum = 1; pageNum <= sf.pageCount; pageNum++) {
+        rebuilt.push({
+          id: crypto.randomUUID(),
+          sourceFileId: sf.id,
+          sourceFileName: sf.name,
+          colorIndex: sf.colorIndex,
+          originalPageNumber: pageNum,
+          rotation: 0,
+          thumbnailUrl: cache[pageNum],
+        });
+      }
+    }
+    setOrganizerPages(rebuilt);
+    setOutputs([]);
+  };
+
+  const handleClearOrganizer = () => {
+    organizerSessionRef.current += 1;
+    organizerColorCounterRef.current = 0;
+    organizerThumbCacheRef.current.clear();
+    setOrganizerFiles([]);
+    setOrganizerPages([]);
+    setOrganizerLoadingCount(0);
+    setOutputs([]);
+    setErrorMessage(null);
+  };
+
   const handleLoadSample = async () => {
     setErrorMessage(null);
-    if (activeTool === 'merge') {
+    if (activeTool === 'organize') {
+      const f1 = await createSamplePdfFile('Documento_Amarillo.pdf', 3);
+      const f2 = await createSamplePdfFile('Anexo_Azul_Pastel.pdf', 3);
+      await addPdfFilesToOrganizer([f1, f2], true);
+    } else if (activeTool === 'merge') {
       const f1 = await createSamplePdfFile('Contrato_Principal.pdf', 2);
       const f2 = await createSamplePdfFile('Anexo_Tecnico.pdf', 2);
       await addFilesToQueue([f1, f2], true);
@@ -353,7 +622,7 @@ export default function App() {
     onProgressUpdate?: (state: ProgressState) => void,
     onToolError?: (message: string) => void
   ): Promise<ProcessedOutput[]> => {
-    if (itemsToProcess.length === 0) return [];
+    if (toolToRun !== 'organize' && itemsToProcess.length === 0) return [];
     setErrorMessage(null);
 
     const reportProgress = (state: ProgressState) => {
@@ -400,7 +669,12 @@ export default function App() {
           throw new Error('Carga al menos un archivo PDF para comprimir.');
         }
         for (const item of pdfItems) {
-          const res = await compressPdf(item.file, compression, reportProgress);
+          const res = await compressPdf(
+            item.file,
+            compression,
+            reportProgress,
+            item.rotation ?? 0
+          );
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -427,6 +701,51 @@ export default function App() {
           res.pageCount
         );
         createdOutputs.push(out);
+      } else if (toolToRun === 'organize') {
+        if (organizerPages.length === 0) {
+          throw new Error('Carga al menos un archivo PDF y conserva 1 página para exportar.');
+        }
+        const usedIds = new Set(organizerPages.map((p) => p.sourceFileId));
+        const usedFiles = organizerFiles.filter((sf) => usedIds.has(sf.id));
+        const totalInSize = usedFiles.reduce((acc, sf) => acc + sf.size, 0);
+        const res = await assembleOrganizedPdf(
+          organizerFiles,
+          organizerPages,
+          organizeOutputName,
+          organizeStripMetadata,
+          reportProgress
+        );
+        const out = await maybeEncrypt(
+          res.blob,
+          res.fileName,
+          totalInSize,
+          `PDF ordenado desde ${usedFiles.length} ${usedFiles.length === 1 ? 'archivo' : 'archivos'} (${res.pageCount} pág.)`,
+          res.pageCount
+        );
+        createdOutputs.push(out);
+      } else if (toolToRun === 'rotate') {
+        const pdfItems = itemsToProcess.filter((i) => i.kind === 'pdf');
+        if (pdfItems.length === 0) {
+          throw new Error('Carga al menos un archivo PDF para girar.');
+        }
+        for (const item of pdfItems) {
+          const targetDegrees = item.rotation || 90;
+          const res = await rotatePdf(
+            item.file,
+            targetDegrees,
+            item.pageRange,
+            rotateStripMetadata,
+            reportProgress
+          );
+          const out = await maybeEncrypt(
+            res.blob,
+            res.fileName,
+            item.size,
+            `Rotación +${res.appliedDegrees}° (${res.pageCount} pág.)`,
+            res.pageCount
+          );
+          createdOutputs.push(out);
+        }
       } else if (toolToRun === 'batch-to-pdf') {
         const effectiveMode = batchModeOverride ?? batchConvertMode;
         const convertible = itemsToProcess.filter((i) => i.kind !== 'vault');
@@ -477,7 +796,12 @@ export default function App() {
           ? { ...imageExport, format: imageFormatOverride }
           : imageExport;
         for (const item of pdfItems) {
-          const res = await pdfToImages(item.file, effectiveImgConfig, reportProgress);
+          const res = await pdfToImages(
+            item.file,
+            effectiveImgConfig,
+            reportProgress,
+            item.rotation ?? 0
+          );
           const out = await maybeEncrypt(
             res.blob,
             res.fileName,
@@ -496,7 +820,8 @@ export default function App() {
         const res = await imagesToPdf(
           imgItems.map((i) => i.file),
           imageToPdf,
-          reportProgress
+          reportProgress,
+          imgItems.map((i) => i.rotation ?? 0)
         );
         const out = await maybeEncrypt(
           res.blob,
@@ -824,11 +1149,17 @@ export default function App() {
                   </p>
                 </div>
 
-                {queue.length > 0 && (
-                  <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-                    {queue.length} archivo(s) · {formatBytes(totalQueueBytes)}
-                  </div>
-                )}
+                {activeTool === 'organize'
+                  ? organizerFiles.length > 0 && (
+                      <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                        {organizerPages.length} pág(s) · {organizerFiles.length} PDF(s)
+                      </div>
+                    )
+                  : queue.length > 0 && (
+                      <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                        {queue.length} archivo(s) · {formatBytes(totalQueueBytes)}
+                      </div>
+                    )}
               </div>
 
               {contextBanner && (
@@ -844,29 +1175,53 @@ export default function App() {
                 </div>
               )}
 
-              <FileQueuePanel
-                activeTool={activeTool}
-                items={queue}
-                onAddFiles={(files) => {
-                  void addFilesToQueue(files);
-                }}
-                onRemoveItem={handleRemoveItem}
-                onMoveItem={handleMoveItem}
-                onUpdatePageRange={handleUpdatePageRange}
-                onClearAll={() => {
-                  queue.forEach((q) => {
-                    if (q.thumbnailUrl?.startsWith('blob:')) {
-                      URL.revokeObjectURL(q.thumbnailUrl);
-                    }
-                  });
-                  setQueue([]);
-                  setOutputs([]);
-                }}
-                onLoadSample={() => {
-                  void handleLoadSample();
-                }}
-                acceptedHint={currentMeta.acceptedHint}
-              />
+              {activeTool === 'organize' ? (
+                <OrganizePagesGrid
+                  sourceFiles={organizerFiles}
+                  pages={organizerPages}
+                  isLoadingThumbnails={organizerLoadingCount > 0}
+                  onAddPdfFiles={(files) => {
+                    void addPdfFilesToOrganizer(files);
+                  }}
+                  onReorderPage={handleReorderOrganizerPage}
+                  onMovePageStep={handleMoveOrganizerPageStep}
+                  onRotatePage={handleRotateOrganizerPage}
+                  onRotateFilePages={handleRotateOrganizerFilePages}
+                  onRemovePage={handleRemoveOrganizerPage}
+                  onRemoveFile={handleRemoveOrganizerFile}
+                  onGroupByFile={handleGroupOrganizerByFile}
+                  onResetAllPages={handleResetOrganizerPages}
+                  onClearAll={handleClearOrganizer}
+                  onLoadSample={() => {
+                    void handleLoadSample();
+                  }}
+                />
+              ) : (
+                <FileQueuePanel
+                  activeTool={activeTool}
+                  items={queue}
+                  onAddFiles={(files) => {
+                    void addFilesToQueue(files);
+                  }}
+                  onRemoveItem={handleRemoveItem}
+                  onReorderItem={handleReorderItem}
+                  onRotateItem={handleRotateItem}
+                  onUpdatePageRange={handleUpdatePageRange}
+                  onClearAll={() => {
+                    queue.forEach((q) => {
+                      if (q.thumbnailUrl?.startsWith('blob:')) {
+                        URL.revokeObjectURL(q.thumbnailUrl);
+                      }
+                    });
+                    setQueue([]);
+                    setOutputs([]);
+                  }}
+                  onLoadSample={() => {
+                    void handleLoadSample();
+                  }}
+                  acceptedHint={currentMeta.acceptedHint}
+                />
+              )}
 
               <ToolSettingsPanel
                 activeTool={activeTool}
@@ -879,6 +1234,16 @@ export default function App() {
                 onChangeMergeOutputName={setMergeOutputName}
                 mergeStripMetadata={mergeStripMetadata}
                 onChangeMergeStripMetadata={setMergeStripMetadata}
+                organizeOutputName={organizeOutputName}
+                onChangeOrganizeOutputName={setOrganizeOutputName}
+                organizeStripMetadata={organizeStripMetadata}
+                onChangeOrganizeStripMetadata={setOrganizeStripMetadata}
+                organizerPageCount={organizerPages.length}
+                organizerFileCount={organizerFiles.length}
+                rotateStripMetadata={rotateStripMetadata}
+                onChangeRotateStripMetadata={setRotateStripMetadata}
+                onRotateAll={handleRotateAll}
+                onResetRotations={handleResetRotations}
                 imageExport={imageExport}
                 onChangeImageExport={setImageExport}
                 imageToPdf={imageToPdf}

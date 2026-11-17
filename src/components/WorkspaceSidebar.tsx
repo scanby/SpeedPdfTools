@@ -6,10 +6,12 @@ import {
   FolderCog,
   Images,
   Layers,
+  LayoutGrid,
   Lock,
   Minimize2,
   Moon,
   RefreshCw,
+  RotateCw,
   Sun,
 } from 'lucide-react';
 import { CURRENT_APP_VERSION } from '../core/updater';
@@ -50,6 +52,18 @@ const TOOL_GROUPS: ToolNavGroup[] = [
         label: 'Unir PDFs',
         subtitle: 'Combinar y ordenar',
         icon: Layers,
+      },
+      {
+        id: 'organize',
+        label: 'Ordenar PDF',
+        subtitle: 'Páginas por color',
+        icon: LayoutGrid,
+      },
+      {
+        id: 'rotate',
+        label: 'Girar PDF (90°)',
+        subtitle: 'Corregir orientación',
+        icon: RotateCw,
       },
     ],
   },

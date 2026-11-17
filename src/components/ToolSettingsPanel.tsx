@@ -1,4 +1,4 @@
-import { Lock, Play } from 'lucide-react';
+import { Lock, Play, RotateCw } from 'lucide-react';
 import {
   BatchConvertMode,
   CompressionPreset,
@@ -20,6 +20,16 @@ interface ToolSettingsPanelProps {
   onChangeMergeOutputName: (val: string) => void;
   mergeStripMetadata: boolean;
   onChangeMergeStripMetadata: (val: boolean) => void;
+  organizeOutputName: string;
+  onChangeOrganizeOutputName: (val: string) => void;
+  organizeStripMetadata: boolean;
+  onChangeOrganizeStripMetadata: (val: boolean) => void;
+  organizerPageCount: number;
+  organizerFileCount: number;
+  rotateStripMetadata: boolean;
+  onChangeRotateStripMetadata: (val: boolean) => void;
+  onRotateAll: (deltaDegrees: number) => void;
+  onResetRotations: () => void;
   imageExport: ImageExportSettings;
   onChangeImageExport: (next: ImageExportSettings) => void;
   imageToPdf: ImageToPdfSettings;
@@ -92,6 +102,16 @@ export function ToolSettingsPanel({
   onChangeMergeOutputName,
   mergeStripMetadata,
   onChangeMergeStripMetadata,
+  organizeOutputName,
+  onChangeOrganizeOutputName,
+  organizeStripMetadata,
+  onChangeOrganizeStripMetadata,
+  organizerPageCount,
+  organizerFileCount,
+  rotateStripMetadata,
+  onChangeRotateStripMetadata,
+  onRotateAll,
+  onResetRotations,
   imageExport,
   onChangeImageExport,
   imageToPdf,
@@ -126,6 +146,12 @@ export function ToolSettingsPanel({
         return fileCount > 1 ? `Comprimir ${fileCount} PDFs` : 'Comprimir PDF';
       case 'merge':
         return `Unir ${fileCount} archivos PDF`;
+      case 'organize':
+        return organizerPageCount > 0
+          ? `Generar PDF ordenado (${organizerPageCount} págs.)`
+          : 'Generar PDF ordenado';
+      case 'rotate':
+        return fileCount > 1 ? `Guardar ${fileCount} PDFs girados` : 'Girar PDF 90°';
       case 'batch-to-pdf':
         return batchConvertMode === 'single-pdf'
           ? `Convertir ${fileCount} archivos en 1 PDF`
@@ -145,7 +171,7 @@ export function ToolSettingsPanel({
 
   const isDisabled =
     isProcessing ||
-    !hasFiles ||
+    (activeTool === 'organize' ? organizerPageCount === 0 : !hasFiles) ||
     (activeTool === 'merge' && fileCount < 2) ||
     ((activeTool === 'vault' || encryptOutput) && vaultPassword.trim().length < 4);
 
@@ -300,6 +326,97 @@ export function ToolSettingsPanel({
               />
               <span>Limpiar metadatos de origen al fusionar</span>
             </label>
+          </div>
+        </div>
+      )}
+
+      {activeTool === 'organize' && (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <label className="space-y-1.5">
+            <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+              Nombre del PDF organizado
+            </span>
+            <input
+              type="text"
+              value={organizeOutputName}
+              onChange={(e) => onChangeOrganizeOutputName(e.target.value)}
+              placeholder="documento_ordenado"
+              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+            />
+          </label>
+
+          <div className="flex flex-col justify-end gap-2 pb-1">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={organizeStripMetadata}
+                onChange={(e) => onChangeOrganizeStripMetadata(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Limpiar metadatos de origen al exportar</span>
+            </label>
+            {organizerFileCount > 0 && (
+              <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
+                Se exportarán {organizerPageCount} {organizerPageCount === 1 ? 'página' : 'páginas'} desde {organizerFileCount}{' '}
+                {organizerFileCount === 1 ? 'archivo PDF' : 'archivos PDF'} en el orden exacto de la cuadrícula.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {activeTool === 'rotate' && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={!hasFiles}
+              onClick={() => onRotateAll(90)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 text-slate-700 dark:text-slate-200 transition-colors"
+            >
+              <RotateCw className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span>Girar todos +90° (derecha)</span>
+            </button>
+            <button
+              type="button"
+              disabled={!hasFiles}
+              onClick={() => onRotateAll(180)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 text-slate-700 dark:text-slate-200 transition-colors"
+            >
+              <span>Girar todos 180°</span>
+            </button>
+            <button
+              type="button"
+              disabled={!hasFiles}
+              onClick={() => onRotateAll(270)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50 text-slate-700 dark:text-slate-200 transition-colors"
+            >
+              <span>Girar todos -90° (izquierda)</span>
+            </button>
+            <button
+              type="button"
+              disabled={!hasFiles}
+              onClick={onResetRotations}
+              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 transition-colors"
+            >
+              <span>Restablecer (0°)</span>
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={rotateStripMetadata}
+                onChange={(e) => onChangeRotateStripMetadata(e.target.checked)}
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Limpiar metadatos al guardar</span>
+            </label>
+
+            <span className="text-xs text-slate-500 dark:text-slate-400">
+              Las tarjetas giradas conservan su vista previa exacta; si alguna sigue en 0°, se aplicará +90° por defecto.
+            </span>
           </div>
         </div>
       )}

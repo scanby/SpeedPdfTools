@@ -7,7 +7,7 @@ import {
 } from '../types/speedpdf';
 import { docxToPdf } from './docxBridge';
 import { stripExtension, yieldToMain } from './formatters';
-import { imagesToPdf } from './pdfEngine';
+import { applyPdfPageRotation, imagesToPdf } from './pdfEngine';
 
 export interface SeparatePdfResult {
   blob: Blob;
@@ -27,6 +27,12 @@ async function convertSingleItemToPdfBytes(
     const raw = new Uint8Array(await item.file.arrayBuffer());
     const doc = await PDFDocument.load(raw, { ignoreEncryption: true });
     const pageCount = doc.getPageCount();
+    const rot = item.rotation ?? 0;
+    if (rot !== 0) {
+      for (let i = 0; i < pageCount; i++) {
+        applyPdfPageRotation(doc.getPage(i), rot);
+      }
+    }
     const saved = await doc.save({ useObjectStreams: true });
     return { pdfBytes: new Uint8Array(saved), pageCount };
   }
@@ -40,7 +46,7 @@ async function convertSingleItemToPdfBytes(
   }
 
   if (item.kind === 'image') {
-    const res = await imagesToPdf([item.file], imageSettings, onProgress);
+    const res = await imagesToPdf([item.file], imageSettings, onProgress, [item.rotation ?? 0]);
     return {
       pdfBytes: new Uint8Array(await res.blob.arrayBuffer()),
       pageCount: res.pageCount,
