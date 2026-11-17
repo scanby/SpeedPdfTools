@@ -2,11 +2,13 @@ import {
   AlertCircle,
   ArrowUpCircle,
   CheckCircle2,
+  Download,
   ExternalLink,
   GitBranch,
   RefreshCw,
 } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { DesktopUpdateProgress, getDesktopBridge } from '../core/desktopBridge';
 import {
   CURRENT_APP_VERSION,
   DEFAULT_GITHUB_REPO,
@@ -22,12 +24,51 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
   const [repoInput, setRepoInput] = useState(DEFAULT_GITHUB_REPO);
   const [isChecking, setIsChecking] = useState(false);
   const [result, setResult] = useState<UpdateCheckResult | null>(null);
+  const [isInstalling, setIsInstalling] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<DesktopUpdateProgress | null>(null);
+
+  const bridge = getDesktopBridge();
+
+  useEffect(() => {
+    if (!bridge) return;
+    return bridge.onUpdateProgress((progress) => {
+      setUpdateProgress(progress);
+      if (progress.stage === 'error') {
+        setIsInstalling(false);
+      }
+    });
+  }, [bridge]);
 
   const handleCheck = async () => {
     setIsChecking(true);
+    setUpdateProgress(null);
     const res = await checkForUpdatesFromRepo(repoInput);
     setResult(res);
     setIsChecking(false);
+  };
+
+  const handleUnattendedUpdate = async () => {
+    if (!bridge || !result?.installerUrl) return;
+    setIsInstalling(true);
+    setUpdateProgress({
+      stage: 'downloading',
+      percent: 1,
+      message: 'Iniciando descarga de la actualización...',
+    });
+
+    const response = await bridge.installUpdate({
+      downloadUrl: result.installerUrl,
+      fileName: result.installerName || `SPEED.PDF-${result.latestVersion || 'Update'}.exe`,
+    });
+
+    if (!response.started) {
+      setIsInstalling(false);
+      setUpdateProgress({
+        stage: 'error',
+        percent: 0,
+        message: response.error || 'No se pudo iniciar la actualización automática.',
+      });
+    }
   };
 
   return (
@@ -39,10 +80,12 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-200 dark:border-slate-800">
         <div>
           <h2 className="text-base font-display font-semibold text-slate-900 dark:text-slate-100">
-            Buscar actualizaciones manuales
+            Buscar actualizaciones
           </h2>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-            Conecta bajo demanda con el repositorio GitHub para comparar tu versión local con la última publicada.
+            {bridge
+              ? 'Comprueba nuevas versiones en GitHub y actualiza el programa automáticamente.'
+              : 'Compara tu versión local con la última publicada en el repositorio GitHub.'}
           </p>
         </div>
 
@@ -62,15 +105,16 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
               type="text"
               value={repoInput}
               onChange={(e) => setRepoInput(e.target.value)}
+              disabled={isInstalling}
               placeholder="scanby/SpeedPdfTools"
-              className="w-full pl-9 pr-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              className="w-full pl-9 pr-3 py-2 text-xs font-mono rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600 disabled:opacity-60"
             />
           </div>
         </label>
 
         <button
           type="button"
-          disabled={isChecking}
+          disabled={isChecking || isInstalling}
           onClick={() => {
             void handleCheck();
           }}
@@ -136,7 +180,21 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
 
             {result.releaseUrl && (
               <div className="flex flex-wrap items-center gap-2 shrink-0">
-                {result.status === 'update-available' && result.installerUrl && (
+                {result.status === 'update-available' && result.installerUrl && bridge && (
+                  <button
+                    type="button"
+                    disabled={isInstalling}
+                    onClick={() => void handleUnattendedUpdate()}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>
+                      {isInstalling ? 'Actualizando...' : 'Actualizar automáticamente'}
+                    </span>
+                  </button>
+                )}
+
+                {result.status === 'update-available' && result.installerUrl && !bridge && (
                   <a
                     href={result.installerUrl}
                     target="_blank"
@@ -155,13 +213,44 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-200 bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors whitespace-nowrap shrink-0"
                 >
                   <span>
-                    {result.status === 'update-available' ? 'Ver actualización en GitHub' : 'Abrir repositorio'}
+                    {result.status === 'update-available' ? 'Ver en GitHub' : 'Abrir repositorio'}
                   </span>
                   <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
             )}
           </div>
+
+          {updateProgress && (
+            <div className="space-y-1.5 pt-2 border-t border-blue-200/70 dark:border-blue-800/60">
+              <div className="flex items-center justify-between text-xs">
+                <span
+                  className={
+                    updateProgress.stage === 'error'
+                      ? 'text-red-700 dark:text-red-400 font-medium'
+                      : 'text-slate-800 dark:text-slate-200 font-medium'
+                  }
+                >
+                  {updateProgress.message}
+                </span>
+                {updateProgress.stage !== 'error' && (
+                  <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300">
+                    {updateProgress.percent}%
+                  </span>
+                )}
+              </div>
+              {updateProgress.stage !== 'error' && (
+                <div className="w-full h-1.5 rounded-full bg-slate-200 dark:bg-slate-800 overflow-hidden">
+                  <div
+                    className="h-full bg-blue-600 transition-transform duration-150 origin-left"
+                    style={{
+                      transform: `scaleX(${Math.max(0.03, updateProgress.percent / 100)})`,
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          )}
 
           {result.status === 'update-available' && result.releaseNotes && (
             <div className="pt-2 border-t border-blue-200/70 dark:border-blue-800/60">

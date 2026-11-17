@@ -1,4 +1,7 @@
-export const CURRENT_APP_VERSION = '0.1.0';
+import { getDesktopBridge } from './desktopBridge';
+
+export const CURRENT_APP_VERSION: string =
+  getDesktopBridge()?.appVersion || import.meta.env.VITE_APP_VERSION || '0.1.0';
 export const DEFAULT_GITHUB_REPO = 'scanby/SpeedPdfTools';
 
 export type UpdateCheckStatus =
@@ -20,6 +23,10 @@ export interface UpdateCheckResult {
   publishedAt?: string;
   installerUrl?: string;
   installerName?: string;
+  setupUrl?: string;
+  setupName?: string;
+  portableUrl?: string;
+  portableName?: string;
   checkedAt: string;
   message: string;
 }
@@ -66,6 +73,10 @@ function buildComparisonResult(
     publishedAt?: string;
     installerUrl?: string;
     installerName?: string;
+    setupUrl?: string;
+    setupName?: string;
+    portableUrl?: string;
+    portableName?: string;
   }
 ): UpdateCheckResult {
   const cleanRemote = remoteVersion.trim().replace(/^v/i, '');
@@ -85,7 +96,7 @@ function buildComparisonResult(
       source,
       ...extras,
       checkedAt,
-      message: `Hay una nueva versión disponible (${cleanRemote}) superior a tu versión instalada (${CURRENT_APP_VERSION}). Se recomienda actualizar.`,
+      message: `Hay una nueva versión disponible (${cleanRemote}) superior a tu versión instalada (${CURRENT_APP_VERSION}).`,
     };
   }
 
@@ -135,15 +146,24 @@ export async function checkForUpdatesFromRepo(repoInput: string): Promise<Update
       };
 
       if (releaseData.tag_name) {
-        const winAsset = releaseData.assets?.find((a) =>
-          /\.(exe|msi|zip)$/i.test(a.name)
-        );
+        const assets = releaseData.assets ?? [];
+        const setupAsset = assets.find((a) => /setup.*\.exe$/i.test(a.name));
+        const portableAsset = assets.find((a) => /portable.*\.exe$/i.test(a.name));
+        const fallbackAsset = assets.find((a) => /\.(exe|msi|zip)$/i.test(a.name));
+        const preferred = getDesktopBridge()?.isPortable
+          ? portableAsset ?? setupAsset ?? fallbackAsset
+          : setupAsset ?? portableAsset ?? fallbackAsset;
+
         return buildComparisonResult(repo, releaseData.tag_name, 'github-release', {
           releaseUrl: releaseData.html_url,
           releaseNotes: releaseData.body,
           publishedAt: releaseData.published_at,
-          installerUrl: winAsset?.browser_download_url,
-          installerName: winAsset?.name,
+          installerUrl: preferred?.browser_download_url,
+          installerName: preferred?.name,
+          setupUrl: setupAsset?.browser_download_url,
+          setupName: setupAsset?.name,
+          portableUrl: portableAsset?.browser_download_url,
+          portableName: portableAsset?.name,
         });
       }
     }

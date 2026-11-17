@@ -584,87 +584,114 @@ export default function App() {
     const bridge = getDesktopBridge();
     if (!bridge || payload.files.length === 0) return;
 
-    const rawItems = await bridge.readFiles(payload.files);
-    const files = rawItems.map(desktopResultToFile);
-    if (files.length === 0) return;
-
-    let targetTool: PdfToolId = 'compress';
-    let autoRun = payload.autoConvert && !payload.customUi;
-    let batchOverride: BatchConvertMode | undefined;
-    let imgFormatOverride: ImageExportSettings['format'] | undefined;
-
-    if (payload.mode === 'batch-single-pdf') {
-      targetTool = 'batch-to-pdf';
-      batchOverride = 'single-pdf';
-      setBatchConvertMode('single-pdf');
-      autoRun = !payload.customUi;
-    } else if (payload.mode === 'batch-separate-pdfs') {
-      targetTool = 'batch-to-pdf';
-      batchOverride = 'separate-pdfs';
-      setBatchConvertMode('separate-pdfs');
-      autoRun = !payload.customUi;
-    } else if (payload.mode === 'merge') {
-      targetTool = 'merge';
-      autoRun = !payload.customUi && files.length >= 2;
-    } else if (payload.mode === 'word-to-pdf') {
-      targetTool = 'word-to-pdf';
-      autoRun = payload.autoConvert && !payload.customUi;
-    } else if (payload.mode === 'img-to-pdf') {
-      targetTool = 'img-to-pdf';
-      autoRun = payload.autoConvert && !payload.customUi;
-    } else if (payload.mode === 'compress' && payload.autoConvert) {
-      targetTool = 'compress';
-      autoRun = true;
-    } else if (payload.autoConvert && payload.format === 'docx') {
-      targetTool = 'pdf-to-word';
-      autoRun = true;
-    } else if (payload.autoConvert && (payload.format === 'jpg' || payload.format === 'png')) {
-      targetTool = 'pdf-to-img';
-      imgFormatOverride = payload.format === 'png' ? 'png' : 'jpeg';
-      setImageExport((prev) => ({ ...prev, format: imgFormatOverride ?? prev.format }));
-      autoRun = true;
-    } else if (payload.autoConvert && payload.format === 'pdf') {
-      const hasMixed = files.length > 1 && new Set(files.map(detectFileKind)).size > 1;
-      const firstKind = detectFileKind(files[0]);
-      targetTool = hasMixed
-        ? 'batch-to-pdf'
-        : firstKind === 'docx'
-        ? 'word-to-pdf'
-        : 'img-to-pdf';
-      autoRun = true;
-    } else {
-      targetTool = 'compress';
-      autoRun = false;
-    }
-
-    handleSelectTool(targetTool);
-    const items = await addFilesToQueue(files, true);
-
-    if (!autoRun) {
-      setContextBanner(
-        payload.mode === 'merge' && files.length < 2
-          ? `Selecciona al menos 2 PDFs para unir o agrega otro documento aquí (${payload.sourceDir}).`
-          : `Archivo(s) cargados desde el Explorador de Windows (${payload.sourceDir}) listos para ajustar.`
-      );
-      return;
-    }
-
-    const created = await executeToolWithItems(
-      targetTool,
-      items,
-      batchOverride,
-      imgFormatOverride
-    );
-    if (created.length > 0) {
-      const savedNames: string[] = [];
-      for (const out of created) {
-        const bytes = new Uint8Array(await out.blob.arrayBuffer());
-        await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
-        savedNames.push(out.fileName);
+    try {
+      const rawItems = await bridge.readFiles(payload.files);
+      const files = rawItems.map(desktopResultToFile);
+      if (files.length === 0) {
+        await bridge.completeBackgroundTask({
+          ok: false,
+          title: 'SPEED.PDF',
+          body: 'No se encontraron archivos compatibles para procesar.',
+        });
+        return;
       }
-      setContextBanner(
-        `Guardado automáticamente en ${payload.sourceDir}: ${savedNames.join(', ')}`
+
+      let targetTool: PdfToolId = 'compress';
+      let autoRun = payload.autoConvert && !payload.customUi;
+      let batchOverride: BatchConvertMode | undefined;
+      let imgFormatOverride: ImageExportSettings['format'] | undefined;
+
+      if (payload.mode === 'batch-single-pdf') {
+        targetTool = 'batch-to-pdf';
+        batchOverride = 'single-pdf';
+        setBatchConvertMode('single-pdf');
+        autoRun = !payload.customUi;
+      } else if (payload.mode === 'batch-separate-pdfs') {
+        targetTool = 'batch-to-pdf';
+        batchOverride = 'separate-pdfs';
+        setBatchConvertMode('separate-pdfs');
+        autoRun = !payload.customUi;
+      } else if (payload.mode === 'merge') {
+        targetTool = 'merge';
+        autoRun = !payload.customUi && files.length >= 2;
+      } else if (payload.mode === 'word-to-pdf') {
+        targetTool = 'word-to-pdf';
+        autoRun = payload.autoConvert && !payload.customUi;
+      } else if (payload.mode === 'img-to-pdf') {
+        targetTool = 'img-to-pdf';
+        autoRun = payload.autoConvert && !payload.customUi;
+      } else if (payload.mode === 'compress' && payload.autoConvert) {
+        targetTool = 'compress';
+        autoRun = true;
+      } else if (payload.autoConvert && payload.format === 'docx') {
+        targetTool = 'pdf-to-word';
+        autoRun = true;
+      } else if (payload.autoConvert && (payload.format === 'jpg' || payload.format === 'png')) {
+        targetTool = 'pdf-to-img';
+        imgFormatOverride = payload.format === 'png' ? 'png' : 'jpeg';
+        setImageExport((prev) => ({ ...prev, format: imgFormatOverride ?? prev.format }));
+        autoRun = true;
+      } else if (payload.autoConvert && payload.format === 'pdf') {
+        const hasMixed = files.length > 1 && new Set(files.map(detectFileKind)).size > 1;
+        const firstKind = detectFileKind(files[0]);
+        targetTool = hasMixed
+          ? 'batch-to-pdf'
+          : firstKind === 'docx'
+          ? 'word-to-pdf'
+          : 'img-to-pdf';
+        autoRun = true;
+      } else {
+        targetTool = 'compress';
+        autoRun = false;
+      }
+
+      handleSelectTool(targetTool);
+      const items = await addFilesToQueue(files, true);
+
+      if (!autoRun) {
+        await bridge.showMainWindow();
+        setContextBanner(
+          payload.mode === 'merge' && files.length < 2
+            ? `Selecciona al menos 2 PDFs para unir o agrega otro documento aquí (${payload.sourceDir}).`
+            : `Archivo(s) cargados desde el Explorador de Windows (${payload.sourceDir}) listos para ajustar.`
+        );
+        return;
+      }
+
+      const created = await executeToolWithItems(
+        targetTool,
+        items,
+        batchOverride,
+        imgFormatOverride
       );
+
+      if (created.length > 0) {
+        const savedNames: string[] = [];
+        for (const out of created) {
+          const bytes = new Uint8Array(await out.blob.arrayBuffer());
+          await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+          savedNames.push(out.fileName);
+        }
+        const summary = `Guardado en ${payload.sourceDir}: ${savedNames.join(', ')}`;
+        setContextBanner(summary);
+        await bridge.completeBackgroundTask({
+          ok: true,
+          title: 'SPEED.PDF — Proceso completado',
+          body: summary,
+        });
+      } else {
+        await bridge.completeBackgroundTask({
+          ok: false,
+          title: 'SPEED.PDF — No se pudo completar',
+          body: 'Verifica que los archivos seleccionados no estén dañados ni protegidos.',
+        });
+      }
+    } catch (err) {
+      await bridge.completeBackgroundTask({
+        ok: false,
+        title: 'SPEED.PDF — Error al procesar',
+        body: err instanceof Error ? err.message : 'Error inesperado en segundo plano.',
+      });
     }
   };
 
@@ -672,9 +699,11 @@ export default function App() {
     const bridge = getDesktopBridge();
     if (!bridge) return;
     void bridge.getShellStatus().then(setShellStatus).catch(() => {});
-    return bridge.onShellLaunchArgs((payload) => {
+    const unsubscribe = bridge.onShellLaunchArgs((payload) => {
       void desktopHandlerRef.current(payload);
     });
+    bridge.signalReady();
+    return unsubscribe;
   }, []);
 
   const handleToggleDesktopShell = async (install: boolean) => {

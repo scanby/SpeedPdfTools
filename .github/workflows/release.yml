@@ -31,15 +31,6 @@ jobs:
       - name: TypeScript check
         run: npm run lint
 
-      - name: Build renderer bundle for Electron
-        shell: pwsh
-        run: |
-          $env:ELECTRON_BUILD = "true"
-          npm run build
-          if (Test-Path "desktop/renderer") { Remove-Item -Recurse -Force "desktop/renderer" }
-          New-Item -ItemType Directory -Force -Path "desktop/renderer" | Out-Null
-          Copy-Item -Recurse -Force "dist\*" "desktop/renderer"
-
       - name: Sync release version
         shell: pwsh
         run: |
@@ -54,7 +45,17 @@ jobs:
             $pkg = Get-Content "desktop/package.json" -Raw | ConvertFrom-Json
             $pkg.version = $ver
             $pkg | ConvertTo-Json -Depth 10 | Set-Content "desktop/package.json" -Encoding UTF8
+            "VITE_APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           }
+
+      - name: Build renderer bundle for Electron
+        shell: pwsh
+        run: |
+          $env:ELECTRON_BUILD = "true"
+          npm run build
+          if (Test-Path "desktop/renderer") { Remove-Item -Recurse -Force "desktop/renderer" }
+          New-Item -ItemType Directory -Force -Path "desktop/renderer" | Out-Null
+          Copy-Item -Recurse -Force "dist\*" "desktop/renderer"
 
       - name: Install Electron desktop dependencies
         working-directory: desktop

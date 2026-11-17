@@ -7,6 +7,11 @@ export default defineConfig(() => {
   return {
     base: process.env.ELECTRON_BUILD === 'true' ? './' : '/',
     build: process.env.ELECTRON_BUILD === 'true' ? { target: 'chrome108' } : undefined,
+    define: {
+      'import.meta.env.VITE_APP_VERSION': JSON.stringify(
+        process.env.VITE_APP_VERSION || process.env.npm_package_version || '0.1.0'
+      ),
+    },
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {

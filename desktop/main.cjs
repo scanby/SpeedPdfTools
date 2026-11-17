@@ -1,14 +1,15 @@
-const { app, BrowserWindow, ipcMain, protocol, shell } = require('electron');
-const { execFile } = require('child_process');
+const { app, BrowserWindow, Notification, ipcMain, protocol, shell } = require('electron');
+const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const fsp = fs.promises;
+const http = require('http');
+const https = require('https');
 const path = require('path');
 
 // Evita pantallas negras por incompatibilidad de aceleración GPU (D3D/ANGLE) en Windows 7–11 y ejecutables Portables
 app.disableHardwareAcceleration();
 
 // Registrar el protocolo app:// como origen estándar y seguro antes de app.whenReady()
-// Esto evita bloqueos CORS de <script type="module" crossorigin> y Workers .mjs en file://
 protocol.registerSchemesAsPrivileged([
   {
     scheme: 'app',
@@ -41,6 +42,8 @@ const MIME_TYPES = {
 const UTF8_TEXT_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg']);
 
 let mainWindow = null;
+let rendererIsReady = false;
+let launchedHeadlessForCli = false;
 let pendingLaunchPayload = null;
 let launchBatch = null;
 let launchBatchTimer = null;
@@ -143,23 +146,35 @@ function parseCliArgs(argv) {
   };
 }
 
+function revealMainWindow() {
+  launchedHeadlessForCli = false;
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow.isVisible()) mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
+function deliverPayloadToRenderer(payload) {
+  if (!payload || !mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('speedpdf:launch-args', payload);
+  if (!payload.autoConvert || payload.customUi) {
+    revealMainWindow();
+  }
+}
+
 function flushLaunchBatch() {
   launchBatchTimer = null;
   if (!launchBatch) return;
   const payload = launchBatch;
   launchBatch = null;
 
-  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
-    mainWindow.webContents.send('speedpdf:launch-args', payload);
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+  if (mainWindow && !mainWindow.isDestroyed() && rendererIsReady) {
+    deliverPayloadToRenderer(payload);
   } else {
     pendingLaunchPayload = payload;
   }
 }
 
-// Acumula múltiples invocaciones paralelas del Explorador de Windows (MultiSelectModel=Player)
-// en una sola carga unificada durante 300 ms
 function enqueueLaunchPayload(payload) {
   if (!payload) return;
 
@@ -424,12 +439,119 @@ async function getWindowsShellStatus() {
   }
 }
 
-function createMainWindow() {
+// Mantiene sincronizada la ruta del ejecutable si el usuario actualizó la versión Portable
+async function refreshShellMenuIfOutdated() {
+  if (process.platform !== 'win32' || !app.isPackaged) return;
+  try {
+    const out = await runRegCommand([
+      'query',
+      'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
+      '/v',
+      'Icon',
+    ]);
+    const exePath = getDesktopExePath();
+    if (!out.toLowerCase().includes(exePath.toLowerCase())) {
+      await importRegContent(buildInstallRegContent(exePath));
+    }
+  } catch {
+    // El menú contextual aún no está activado por el usuario
+  }
+}
+
+function isAllowedUpdateUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    return (
+      parsed.hostname === 'github.com' ||
+      parsed.hostname.endsWith('.github.com') ||
+      parsed.hostname.endsWith('.githubusercontent.com')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function downloadFileWithProgress(url, destPath, onProgress, redirectsLeft = 8) {
+  return new Promise((resolve, reject) => {
+    const client = url.startsWith('https:') ? https : http;
+    const req = client.get(
+      url,
+      {
+        headers: {
+          'User-Agent': `SPEED.PDF/${app.getVersion()}`,
+          Accept: 'application/octet-stream',
+        },
+      },
+      (res) => {
+        const status = res.statusCode || 0;
+        if ([301, 302, 303, 307, 308].includes(status) && res.headers.location) {
+          res.resume();
+          if (redirectsLeft <= 0) {
+            reject(new Error('Demasiadas redirecciones al descargar la actualización.'));
+            return;
+          }
+          const nextUrl = new URL(res.headers.location, url).toString();
+          downloadFileWithProgress(nextUrl, destPath, onProgress, redirectsLeft - 1)
+            .then(resolve)
+            .catch(reject);
+          return;
+        }
+
+        if (status < 200 || status >= 300) {
+          res.resume();
+          reject(new Error(`Error HTTP ${status} al descargar el instalador.`));
+          return;
+        }
+
+        const totalBytes = Number(res.headers['content-length'] || 0);
+        let receivedBytes = 0;
+        let lastSentPercent = -1;
+
+        const fileStream = fs.createWriteStream(destPath);
+        res.on('data', (chunk) => {
+          receivedBytes += chunk.length;
+          if (totalBytes > 0) {
+            const pct = Math.min(99, Math.round((receivedBytes / totalBytes) * 100));
+            if (pct !== lastSentPercent) {
+              lastSentPercent = pct;
+              onProgress(pct, receivedBytes, totalBytes);
+            }
+          }
+        });
+
+        res.pipe(fileStream);
+
+        fileStream.on('finish', () => {
+          fileStream.close(() => resolve());
+        });
+
+        fileStream.on('error', (err) => {
+          fs.unlink(destPath, () => {});
+          reject(err);
+        });
+      }
+    );
+
+    req.on('error', (err) => {
+      fs.unlink(destPath, () => {});
+      reject(err);
+    });
+  });
+}
+
+function escapePsSingleQuoted(value) {
+  return value.replace(/'/g, "''");
+}
+
+function createMainWindow(startHidden) {
+  rendererIsReady = false;
   mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
     minWidth: 960,
     minHeight: 640,
+    show: !startHidden,
     title: 'SPEED.PDF',
     autoHideMenuBar: true,
     backgroundColor: '#0f172a',
@@ -449,17 +571,11 @@ function createMainWindow() {
     mainWindow.loadURL('app://speedpdf/index.html');
   }
 
-  mainWindow.webContents.on('did-finish-load', () => {
-    if (pendingLaunchPayload) {
-      mainWindow.webContents.send('speedpdf:launch-args', pendingLaunchPayload);
-      pendingLaunchPayload = null;
-    }
-  });
-
   mainWindow.webContents.on(
     'did-fail-load',
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
+      revealMainWindow();
       const html = `<!doctype html><html lang="es"><body style="font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:32px;"><h2>No se pudo iniciar SPEED.PDF</h2><p>${errorDescription} (${errorCode})</p><p style="color:#94a3b8;font-size:12px;">${validatedURL}</p></body></html>`;
       mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
     }
@@ -485,23 +601,29 @@ if (!gotSingleInstanceLock) {
     const payload = parseCliArgs(commandLine);
     if (payload) {
       enqueueLaunchPayload(payload);
-    } else if (mainWindow) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
+    } else {
+      revealMainWindow();
     }
   });
 
   app.whenReady().then(() => {
     registerAppProtocol();
+    void refreshShellMenuIfOutdated();
+
     const initialPayload = parseCliArgs(process.argv);
+    const startHidden = Boolean(
+      initialPayload && initialPayload.autoConvert && !initialPayload.customUi
+    );
+    launchedHeadlessForCli = startHidden;
+
     if (initialPayload) {
       enqueueLaunchPayload(initialPayload);
     }
-    createMainWindow();
+    createMainWindow(startHidden);
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {
-        createMainWindow();
+        createMainWindow(false);
       }
     });
   });
@@ -512,6 +634,34 @@ if (!gotSingleInstanceLock) {
     }
   });
 }
+
+ipcMain.on('speedpdf:renderer-ready', () => {
+  rendererIsReady = true;
+  if (pendingLaunchPayload) {
+    const payload = pendingLaunchPayload;
+    pendingLaunchPayload = null;
+    deliverPayloadToRenderer(payload);
+  }
+});
+
+ipcMain.handle('speedpdf:show-main-window', () => {
+  revealMainWindow();
+});
+
+ipcMain.handle('speedpdf:background-complete', (_event, info) => {
+  const title = (info && info.title) || 'SPEED.PDF';
+  const body = (info && info.body) || 'Operación completada.';
+
+  if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+  }
+
+  if (launchedHeadlessForCli) {
+    setTimeout(() => {
+      app.quit();
+    }, 1200);
+  }
+});
 
 ipcMain.handle('speedpdf:read-files', async (_event, filePaths) => {
   const results = [];
@@ -562,4 +712,89 @@ ipcMain.handle('speedpdf:uninstall-shell-menu', async () => {
   }
   await importRegContent(buildUninstallRegContent());
   return getWindowsShellStatus();
+});
+
+ipcMain.handle('speedpdf:install-update', async (_event, { downloadUrl, fileName }) => {
+  if (process.platform !== 'win32') {
+    return { started: false, error: 'La actualización desatendida solo está disponible en Windows.' };
+  }
+  if (!isAllowedUpdateUrl(downloadUrl)) {
+    return { started: false, error: 'URL de actualización no permitida.' };
+  }
+
+  const sendProgress = (stage, percent, message) => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('speedpdf:update-progress', { stage, percent, message });
+    }
+  };
+
+  const safeName = path.basename(fileName || 'SPEED.PDF-Update.exe');
+  const tempDownloadPath = path.join(app.getPath('temp'), `speedpdf_dl_${Date.now()}_${safeName}`);
+
+  try {
+    sendProgress('downloading', 2, `Descargando ${safeName}...`);
+    await downloadFileWithProgress(downloadUrl, tempDownloadPath, (pct, received, total) => {
+      const mbDone = (received / (1024 * 1024)).toFixed(1);
+      const mbTotal = (total / (1024 * 1024)).toFixed(1);
+      sendProgress('downloading', pct, `Descargando ${safeName} (${mbDone} / ${mbTotal} MB)...`);
+    });
+
+    sendProgress('installing', 100, 'Instalando actualización en segundo plano y reiniciando...');
+
+    const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
+    const scriptPath = path.join(app.getPath('temp'), `speedpdf_updater_${Date.now()}.ps1`);
+    let psLines;
+
+    if (portableExe && /portable/i.test(safeName)) {
+      const targetDir = path.dirname(portableExe);
+      const nextPortablePath = path.join(targetDir, safeName);
+      psLines = [
+        'Start-Sleep -Seconds 2',
+        `$src = '${escapePsSingleQuoted(tempDownloadPath)}'`,
+        `$dst = '${escapePsSingleQuoted(nextPortablePath)}'`,
+        `$old = '${escapePsSingleQuoted(portableExe)}'`,
+        'Copy-Item -LiteralPath $src -Destination $dst -Force',
+        'Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue',
+        'if (($dst -ne $old) -and (Test-Path -LiteralPath $dst) -and (Test-Path -LiteralPath $old)) {',
+        '  Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue',
+        '}',
+        'if (Test-Path -LiteralPath $dst) { Start-Process -FilePath $dst }',
+        'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
+      ];
+    } else {
+      const relaunchExe = portableExe || process.execPath;
+      psLines = [
+        'Start-Sleep -Seconds 2',
+        `$inst = '${escapePsSingleQuoted(tempDownloadPath)}'`,
+        `$app = '${escapePsSingleQuoted(relaunchExe)}'`,
+        "Start-Process -FilePath $inst -ArgumentList '/S' -Wait",
+        'Remove-Item -LiteralPath $inst -Force -ErrorAction SilentlyContinue',
+        'if (Test-Path -LiteralPath $app) { Start-Process -FilePath $app }',
+        'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
+      ];
+    }
+
+    const utf8BomScript = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(psLines.join('\r\n'), 'utf8'),
+    ]);
+    await fsp.writeFile(scriptPath, utf8BomScript);
+
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath],
+      { detached: true, windowsHide: true, stdio: 'ignore' }
+    );
+    child.unref();
+
+    setTimeout(() => {
+      app.quit();
+    }, 500);
+
+    return { started: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Error descargando la actualización.';
+    sendProgress('error', 0, msg);
+    return { started: false, error: msg };
+  }
 });

@@ -22,15 +22,31 @@ export interface DesktopShellStatus {
   exePath: string;
 }
 
+export interface DesktopUpdateProgress {
+  stage: 'downloading' | 'installing' | 'error';
+  percent: number;
+  message: string;
+}
+
 export interface SpeedPdfDesktopApi {
   isDesktop: boolean;
+  isPortable: boolean;
+  appVersion: string;
   readFiles: (filePaths: string[]) => Promise<DesktopReadFileResult[]>;
   writeFile: (targetDir: string, fileName: string, bytes: Uint8Array) => Promise<string>;
   openExternal: (url: string) => Promise<void>;
   onShellLaunchArgs: (callback: (payload: DesktopLaunchPayload) => void) => () => void;
+  signalReady: () => void;
+  showMainWindow: () => Promise<void>;
+  completeBackgroundTask: (info: { ok: boolean; title: string; body: string }) => Promise<void>;
   getShellStatus: () => Promise<DesktopShellStatus>;
   installShellMenu: () => Promise<DesktopShellStatus>;
   uninstallShellMenu: () => Promise<DesktopShellStatus>;
+  installUpdate: (params: {
+    downloadUrl: string;
+    fileName: string;
+  }) => Promise<{ started: boolean; error?: string }>;
+  onUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void;
 }
 
 declare global {
