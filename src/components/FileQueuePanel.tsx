@@ -220,6 +220,12 @@ export function FileQueuePanel({
                           +{rotation}°
                         </span>
                       )}
+                      {item.requiresPassword && (
+                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded bg-amber-100 dark:bg-amber-950/80 text-amber-800 dark:text-amber-200 truncate">
+                          <Lock className="w-2.5 h-2.5 shrink-0" />
+                          <span>Clave</span>
+                        </span>
+                      )}
                     </div>
 
                     <button
@@ -274,13 +280,22 @@ export function FileQueuePanel({
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 tabular-nums mt-0.5">
                         <span>{formatBytes(item.size)}</span>
-                        {typeof item.pageCount === 'number' && (
+                        {item.requiresPassword ? (
                           <>
                             <span aria-hidden="true">·</span>
-                            <span>
-                              {item.pageCount} {item.pageCount === 1 ? 'pág.' : 'págs.'}
+                            <span className="text-amber-700 dark:text-amber-300 font-medium">
+                              Clave requerida
                             </span>
                           </>
+                        ) : (
+                          typeof item.pageCount === 'number' && (
+                            <>
+                              <span aria-hidden="true">·</span>
+                              <span>
+                                {item.pageCount} {item.pageCount === 1 ? 'pág.' : 'págs.'}
+                              </span>
+                            </>
+                          )
                         )}
                         <span aria-hidden="true">·</span>
                         <span className="uppercase font-mono">{item.kind}</span>

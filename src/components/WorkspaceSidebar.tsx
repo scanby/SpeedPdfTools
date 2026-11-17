@@ -13,6 +13,7 @@ import {
   RefreshCw,
   RotateCw,
   Sun,
+  Unlock,
 } from 'lucide-react';
 import { CURRENT_APP_VERSION } from '../core/updater';
 import { PdfToolId } from '../types/speedpdf';
@@ -103,8 +104,14 @@ const TOOL_GROUPS: ToolNavGroup[] = [
     ],
   },
   {
-    groupLabel: 'Privacidad cifrada',
+    groupLabel: 'Seguridad y cifrado',
     items: [
+      {
+        id: 'unlock',
+        label: 'Desproteger PDF',
+        subtitle: 'Quitar restricciones y clave',
+        icon: Unlock,
+      },
       {
         id: 'vault',
         label: 'Bóveda AES-256',

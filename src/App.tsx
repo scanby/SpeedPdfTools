@@ -36,6 +36,7 @@ import {
   pdfToImages,
   renderPdfAllPageThumbnails,
   rotatePdf,
+  unlockPdf,
 } from './core/pdfEngine';
 import {
   createSampleDocxFile,
@@ -59,6 +60,7 @@ import {
   ProgressState,
   QueueFileItem,
   RotationAngle,
+  UnlockPdfSettings,
   WordConversionSettings,
 } from './types/speedpdf';
 
@@ -128,6 +130,13 @@ const TOOL_METADATA: Record<
       'Transforma documentos .docx en archivos PDF portables con paginación automática y tipografía nítida.',
     acceptedHint: 'Documentos Word (.docx)',
     acceptAttr: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  },
+  unlock: {
+    title: 'Desproteger archivos PDF',
+    description:
+      'Elimina restricciones de edición, copia o impresión al instante y quita contraseñas de apertura ingresando tu clave localmente.',
+    acceptedHint: 'Archivos PDF protegidos (.pdf)',
+    acceptAttr: '.pdf,application/pdf',
   },
   vault: {
     title: 'Bóveda cifrada local AES-256-GCM',
@@ -201,6 +210,13 @@ export default function App() {
     preservePageBreaks: true,
     fontSize: 11,
     pageSize: 'a4',
+  });
+
+  const [unlockSettings, setUnlockSettings] = useState<UnlockPdfSettings>({
+    password: '',
+    dpi: 200,
+    jpegQuality: 0.93,
+    stripMetadata: true,
   });
 
   const [vaultMode, setVaultMode] = useState<'encrypt' | 'decrypt'>('encrypt');
@@ -337,7 +353,7 @@ export default function App() {
     setActiveSection(section);
     if (
       section === 'workspace' &&
-      !['compress', 'merge', 'organize', 'rotate', 'vault'].includes(activeTool)
+      !['compress', 'merge', 'organize', 'rotate', 'unlock', 'vault'].includes(activeTool)
     ) {
       setActiveTool('compress');
     } else if (
@@ -355,7 +371,7 @@ export default function App() {
     setErrorMessage(null);
     setContextBanner(null);
     setOutputs([]);
-    if (['compress', 'merge', 'organize', 'rotate', 'vault'].includes(tool)) {
+    if (['compress', 'merge', 'organize', 'rotate', 'unlock', 'vault'].includes(tool)) {
       setActiveSection('workspace');
     } else {
       setActiveSection('converter');
@@ -402,7 +418,12 @@ export default function App() {
           setQueue((prev) =>
             prev.map((q) =>
               q.id === item.id
-                ? { ...q, pageCount: info.pageCount, thumbnailUrl: info.thumbnailUrl }
+                ? {
+                    ...q,
+                    pageCount: info.pageCount,
+                    thumbnailUrl: info.thumbnailUrl,
+                    requiresPassword: info.requiresPassword,
+                  }
                 : q
             )
           );
@@ -874,6 +895,29 @@ export default function App() {
           );
           createdOutputs.push(out);
         }
+      } else if (toolToRun === 'unlock') {
+        const pdfItems = itemsToProcess.filter((i) => i.kind === 'pdf');
+        if (pdfItems.length === 0) {
+          throw new Error('Carga al menos un archivo PDF para desproteger.');
+        }
+        for (const item of pdfItems) {
+          const res = await unlockPdf(
+            item.file,
+            unlockSettings,
+            reportProgress,
+            item.rotation ?? 0
+          );
+          const out = await maybeEncrypt(
+            res.blob,
+            res.fileName,
+            item.size,
+            res.wasProtected
+              ? `Restricciones eliminadas (${res.pageCount} pág.)`
+              : `Copia limpia sin restricciones (${res.pageCount} pág.)`,
+            res.pageCount
+          );
+          createdOutputs.push(out);
+        }
       } else if (toolToRun === 'vault') {
         for (const item of itemsToProcess) {
           reportProgress({
@@ -982,6 +1026,9 @@ export default function App() {
       } else if (normalizedMode === 'rotate') {
         targetTool = 'rotate';
         autoRun = !payload.customUi;
+      } else if (normalizedMode === 'unlock') {
+        targetTool = 'unlock';
+        autoRun = payload.autoConvert && !payload.customUi;
       } else if (normalizedMode === 'pdf-to-word' || normalizedFormat === 'docx') {
         targetTool = 'pdf-to-word';
         autoRun = payload.autoConvert && !payload.customUi;
@@ -1106,6 +1153,17 @@ export default function App() {
           body: summary,
         });
       } else {
+        if (
+          targetTool === 'unlock' &&
+          capturedError &&
+          /contraseñ|password|clave/i.test(capturedError)
+        ) {
+          await bridge.showMainWindow();
+          setContextBanner(
+            `El archivo seleccionado requiere contraseña de apertura. Escríbela abajo y pulsa "Desproteger PDF".`
+          );
+          return;
+        }
         await bridge.completeBackgroundTask({
           ok: false,
           title: 'SPEED.PDF — No se pudo completar',
@@ -1306,6 +1364,8 @@ export default function App() {
                 onChangeImageToPdf={setImageToPdf}
                 wordSettings={wordSettings}
                 onChangeWordSettings={setWordSettings}
+                unlockSettings={unlockSettings}
+                onChangeUnlockSettings={setUnlockSettings}
                 vaultMode={vaultMode}
                 onChangeVaultMode={setVaultMode}
                 batchConvertMode={batchConvertMode}
@@ -1364,7 +1424,7 @@ export default function App() {
 
             <ul className="text-xs text-slate-600 dark:text-slate-300 space-y-1.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
               <li>
-                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Convertir a Word o JPG
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Convertir a Word, JPG o Desproteger PDF
               </li>
               <li>
                 <strong className="font-mono text-slate-800 dark:text-slate-100">.docx</strong> → Convertir a PDF, Unir en 1 PDF o PDFs separados

@@ -100,6 +100,14 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg\\command]',
       `@="\\"${exe}\\" --mode=pdf-to-img --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
+      '',
+      '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\06_Unlock]',
+      '"MUIVerb"="Desproteger PDF"',
+      `"Icon"="${exe},0"`,
+      '"MultiSelectModel"="Player"',
+      '',
+      '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\06_Unlock\\command]',
+      `@="\\"${exe}\\" --mode=unlock --auto-convert --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }

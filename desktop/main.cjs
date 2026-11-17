@@ -771,6 +771,13 @@ function buildInstallRegContent(exePath) {
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\05_ToJpg\\command]',
     `@="\\"${exe}\\" --mode=pdf-to-img --auto-convert --format=jpg --output-dir=source --input=\\"%1\\""`,
     '',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\06_Unlock]',
+    '"MUIVerb"="Desproteger PDF"',
+    `"Icon"="${exe},0"`,
+    '"MultiSelectModel"="Player"',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\06_Unlock\\command]',
+    `@="\\"${exe}\\" --mode=unlock --auto-convert --output-dir=source --input=\\"%1\\""`,
+    '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.docx\\shell\\SpeedPdfMenu]',
     '"MUIVerb"="SPEED.PDF"',
     `"Icon"="${exe},0"`,
@@ -1065,6 +1072,17 @@ async function refreshShellMenuIfOutdated() {
       jpgCmdOut = '';
     }
 
+    let unlockCmdOut = '';
+    try {
+      unlockCmdOut = await runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\06_Unlock\\command',
+        '/ve',
+      ]);
+    } catch {
+      unlockCmdOut = '';
+    }
+
     const pdfNeedsRepair =
       !registeredPdfExe ||
       isTempExecutablePath(registeredPdfExe) ||
@@ -1077,7 +1095,8 @@ async function refreshShellMenuIfOutdated() {
       !hasValidRuntimeForExe(registeredBatchExe) ||
       registeredBatchExe.toLowerCase() !== preferredExe.toLowerCase();
 
-    const commandsNeedUpgrade = !/--mode=pdf-to-img/i.test(jpgCmdOut);
+    const commandsNeedUpgrade =
+      !/--mode=pdf-to-img/i.test(jpgCmdOut) || !/--mode=unlock/i.test(unlockCmdOut);
 
     if (pdfNeedsRepair || batchNeedsRepair || commandsNeedUpgrade) {
       await importRegContent(buildInstallRegContent(preferredExe));
@@ -1189,6 +1208,7 @@ function createMainWindow(startHidden) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: false,
     },
   });
 

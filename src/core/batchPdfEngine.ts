@@ -7,7 +7,7 @@ import {
 } from '../types/speedpdf';
 import { docxToPdf } from './docxBridge';
 import { stripExtension, yieldToMain } from './formatters';
-import { applyPdfPageRotation, imagesToPdf } from './pdfEngine';
+import { applyPdfPageRotation, imagesToPdf, loadCleanPdfDocument, rebuildCleanPdfViaPdfJs } from './pdfEngine';
 
 export interface SeparatePdfResult {
   blob: Blob;
@@ -25,7 +25,12 @@ async function convertSingleItemToPdfBytes(
 ): Promise<{ pdfBytes: Uint8Array; pageCount: number }> {
   if (item.kind === 'pdf') {
     const raw = new Uint8Array(await item.file.arrayBuffer());
-    const doc = await PDFDocument.load(raw, { ignoreEncryption: true });
+    const { doc } = await loadCleanPdfDocument(raw, {
+      fileName: item.name,
+      dpi: 200,
+      jpegQuality: 0.93,
+      onProgress,
+    });
     const pageCount = doc.getPageCount();
     const rot = item.rotation ?? 0;
     if (rot !== 0) {
@@ -88,13 +93,30 @@ export async function convertMixedBatchToSinglePdf(
       () => {}
     );
 
-    const srcDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const { doc: srcDoc } = await loadCleanPdfDocument(pdfBytes, {
+      fileName: item.name,
+      dpi: 200,
+      jpegQuality: 0.93,
+    });
     const indices = Array.from({ length: srcDoc.getPageCount() }, (_, idx) => idx);
-    const copiedPages = await outDoc.copyPages(srcDoc, indices);
-
-    for (const page of copiedPages) {
-      outDoc.addPage(page);
-      totalPages++;
+    try {
+      const copiedPages = await outDoc.copyPages(srcDoc, indices);
+      for (const page of copiedPages) {
+        outDoc.addPage(page);
+        totalPages++;
+      }
+    } catch {
+      const rebuiltDoc = await rebuildCleanPdfViaPdfJs(pdfBytes, {
+        fileName: item.name,
+        dpi: 200,
+        jpegQuality: 0.93,
+      });
+      const safeIndices = Array.from({ length: rebuiltDoc.getPageCount() }, (_, idx) => idx);
+      const copiedPages = await outDoc.copyPages(rebuiltDoc, safeIndices);
+      for (const page of copiedPages) {
+        outDoc.addPage(page);
+        totalPages++;
+      }
     }
 
     await yieldToMain();

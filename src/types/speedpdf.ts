@@ -5,6 +5,7 @@ export type PdfToolId =
   | 'merge'
   | 'organize'
   | 'rotate'
+  | 'unlock'
   | 'batch-to-pdf'
   | 'pdf-to-img'
   | 'img-to-pdf'
@@ -33,6 +34,7 @@ export interface QueueFileItem {
   pageRange: string;
   rotation?: RotationAngle;
   thumbnailUrl?: string;
+  requiresPassword?: boolean;
   addedAt: number;
 }
 
@@ -61,6 +63,13 @@ export interface CompressionSettings {
   jpegQuality: number;
   stripMetadata: boolean;
   structuralOnly: boolean;
+}
+
+export interface UnlockPdfSettings {
+  password: string;
+  dpi: number;
+  jpegQuality: number;
+  stripMetadata: boolean;
 }
 
 export interface ImageExportSettings {

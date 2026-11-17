@@ -1,4 +1,5 @@
-import { Lock, Play, RotateCw } from 'lucide-react';
+import { Eye, EyeOff, Lock, Play, RotateCw, Unlock } from 'lucide-react';
+import { useState } from 'react';
 import {
   BatchConvertMode,
   CompressionPreset,
@@ -6,6 +7,7 @@ import {
   ImageExportSettings,
   ImageToPdfSettings,
   PdfToolId,
+  UnlockPdfSettings,
   WordConversionSettings,
 } from '../types/speedpdf';
 
@@ -36,6 +38,8 @@ interface ToolSettingsPanelProps {
   onChangeImageToPdf: (next: ImageToPdfSettings) => void;
   wordSettings: WordConversionSettings;
   onChangeWordSettings: (next: WordConversionSettings) => void;
+  unlockSettings: UnlockPdfSettings;
+  onChangeUnlockSettings: (next: UnlockPdfSettings) => void;
   vaultMode: 'encrypt' | 'decrypt';
   onChangeVaultMode: (mode: 'encrypt' | 'decrypt') => void;
   batchConvertMode: BatchConvertMode;
@@ -118,6 +122,8 @@ export function ToolSettingsPanel({
   onChangeImageToPdf,
   wordSettings,
   onChangeWordSettings,
+  unlockSettings,
+  onChangeUnlockSettings,
   vaultMode,
   onChangeVaultMode,
   batchConvertMode,
@@ -130,6 +136,8 @@ export function ToolSettingsPanel({
   onChangeVaultPassword,
   onExecute,
 }: ToolSettingsPanelProps) {
+  const [showUnlockPassword, setShowUnlockPassword] = useState(false);
+
   const applyPreset = (preset: (typeof COMPRESSION_PRESETS)[number]) => {
     onChangeCompression({
       ...compression,
@@ -164,6 +172,8 @@ export function ToolSettingsPanel({
         return 'Convertir PDF a Word (.docx)';
       case 'word-to-pdf':
         return 'Convertir Word a PDF';
+      case 'unlock':
+        return fileCount > 1 ? `Desproteger ${fileCount} PDFs` : 'Desproteger PDF';
       case 'vault':
         return vaultMode === 'encrypt' ? 'Cifrar archivo localmente' : 'Descifrar archivo local';
     }
@@ -643,6 +653,76 @@ export function ToolSettingsPanel({
               />
             </label>
           )}
+        </div>
+      )}
+
+      {activeTool === 'unlock' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-blue-200/80 dark:border-blue-900/60 bg-blue-50/60 dark:bg-blue-950/30 px-3.5 py-2.5 flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300">
+            <Unlock className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+            <span>
+              Elimina bloqueos de edición, copia, impresión o firma automáticamente. Si el PDF además solicita contraseña al abrirlo, ingrésala debajo para generar una copia libre.
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Contraseña de apertura (si el PDF la solicita)
+              </span>
+              <div className="relative">
+                <input
+                  type={showUnlockPassword ? 'text' : 'password'}
+                  value={unlockSettings.password}
+                  onChange={(e) =>
+                    onChangeUnlockSettings({ ...unlockSettings, password: e.target.value })
+                  }
+                  placeholder="Opcional (vacío si solo tiene restricciones)"
+                  autoComplete="off"
+                  className="w-full pl-3 pr-9 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowUnlockPassword((prev) => !prev)}
+                  aria-label={showUnlockPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                >
+                  {showUnlockPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Nitidez al reconstruir páginas protegidas
+              </span>
+              <select
+                value={unlockSettings.dpi}
+                onChange={(e) => {
+                  const dpi = Number(e.target.value);
+                  const jpegQuality = dpi >= 300 ? 0.95 : dpi >= 200 ? 0.93 : 0.88;
+                  onChangeUnlockSettings({ ...unlockSettings, dpi, jpegQuality });
+                }}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+              >
+                <option value={150}>150 DPI (Estándar y ligero)</option>
+                <option value={200}>200 DPI (Alta nitidez · Recomendado)</option>
+                <option value={300}>300 DPI (Calidad de impresión)</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={unlockSettings.stripMetadata}
+              onChange={(e) =>
+                onChangeUnlockSettings({ ...unlockSettings, stripMetadata: e.target.checked })
+              }
+              className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+            />
+            <span>Eliminar metadatos privados y rastros de seguridad al desproteger</span>
+          </label>
         </div>
       )}
 

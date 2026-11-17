@@ -1,4 +1,4 @@
-import { openPdfDocument } from './pdfjsSetup';
+import { formatPdfOpenError, openPdfDocument } from './pdfjsSetup';
 import { Document, HeadingLevel, Packer, PageBreak, Paragraph, TextRun } from 'docx';
 import mammoth from 'mammoth';
 import { PDFDocument, PageSizes, StandardFonts, rgb } from 'pdf-lib';
@@ -18,7 +18,13 @@ export async function pdfToDocx(
 ): Promise<{ blob: Blob; fileName: string; pageCount: number }> {
   const sourceBytes = new Uint8Array(await file.arrayBuffer());
   const loadingTask = openPdfDocument(sourceBytes);
-  const pdf = await loadingTask.promise;
+  let pdf: Awaited<ReturnType<typeof openPdfDocument>['promise']>;
+  try {
+    pdf = await loadingTask.promise;
+  } catch (err) {
+    await loadingTask.destroy().catch(() => {});
+    throw formatPdfOpenError(err, file.name);
+  }
   const totalPages = pdf.numPages;
 
   const docParagraphs: Paragraph[] = [];
