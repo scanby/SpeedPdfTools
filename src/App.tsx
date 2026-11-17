@@ -228,6 +228,7 @@ export default function App() {
     setActiveTool(tool);
     setErrorMessage(null);
     setContextBanner(null);
+    setOutputs([]);
     if (['compress', 'merge', 'vault'].includes(tool)) {
       setActiveSection('workspace');
     } else {
@@ -568,7 +569,7 @@ export default function App() {
         setProgress({ active: false, percent: 100, stage: 'Completado' });
       }
 
-      setOutputs((prev) => [...createdOutputs, ...prev]);
+      setOutputs(createdOutputs);
       return createdOutputs;
     } catch (err) {
       setProgress({ active: false, percent: 0, stage: '' });
@@ -765,32 +766,23 @@ export default function App() {
             windowsShellActive={shellStatus ? shellStatus.integrated : null}
           />
 
-            <div className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 space-y-6">
-              {/* Contextual Workspace Breadcrumb & Header */}
-              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 pb-4 border-b border-slate-200 dark:border-slate-800">
+            <div className="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 space-y-5">
+              {/* Minimalist Tool Header */}
+              <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-3 pb-3 border-b border-slate-200 dark:border-slate-800">
                 <div className="space-y-1 max-w-2xl">
-                  <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                    <span>SPEED.PDF</span>
-                    <span aria-hidden="true">/</span>
-                    <span>
-                      {activeSection === 'workspace' ? 'Estación PDF' : 'Conversor local'}
-                    </span>
-                    <span aria-hidden="true">/</span>
-                    <span className="text-slate-800 dark:text-slate-200 font-medium">
-                      {currentMeta.title}
-                    </span>
-                  </div>
-                  <h1 className="text-2xl font-display font-bold tracking-tight text-slate-900 dark:text-slate-50 text-balance">
+                  <h1 className="text-xl font-display font-bold tracking-tight text-slate-900 dark:text-slate-50 text-balance">
                     {currentMeta.title}
                   </h1>
-                  <p className="text-sm text-slate-600 dark:text-slate-400">
+                  <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400">
                     {currentMeta.description}
                   </p>
                 </div>
 
-                <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
-                  {queue.length} archivo(s) · {formatBytes(totalQueueBytes)} en cola
-                </div>
+                {queue.length > 0 && (
+                  <div className="text-xs text-slate-500 dark:text-slate-400 tabular-nums shrink-0">
+                    {queue.length} archivo(s) · {formatBytes(totalQueueBytes)}
+                  </div>
+                )}
               </div>
 
               {contextBanner && (
@@ -822,6 +814,7 @@ export default function App() {
                     }
                   });
                   setQueue([]);
+                  setOutputs([]);
                 }}
                 onLoadSample={() => {
                   void handleLoadSample();
@@ -866,6 +859,7 @@ export default function App() {
                 outputs={outputs}
                 errorMessage={errorMessage}
                 onDismissError={() => setErrorMessage(null)}
+                onDismissOutputs={() => setOutputs([])}
               />
             </div>
           </div>

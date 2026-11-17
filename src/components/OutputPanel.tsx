@@ -9,6 +9,7 @@ interface OutputPanelProps {
   outputs: ProcessedOutput[];
   errorMessage: string | null;
   onDismissError: () => void;
+  onDismissOutputs: () => void;
 }
 
 export function OutputPanel({
@@ -16,6 +17,7 @@ export function OutputPanel({
   outputs,
   errorMessage,
   onDismissError,
+  onDismissOutputs,
 }: OutputPanelProps) {
   const [previewItem, setPreviewItem] = useState<ProcessedOutput | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -85,15 +87,12 @@ export function OutputPanel({
       )}
 
       {outputs.length > 0 && (
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/70 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
+        <div className="rounded-xl border border-emerald-200/80 dark:border-emerald-900/60 bg-white dark:bg-slate-900/70 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
             <h3 className="text-sm font-display font-semibold text-slate-900 dark:text-slate-100">
-              Resultados listos en el dispositivo
+              {outputs.length === 1 ? 'Archivo listo' : `${outputs.length} archivos listos`}
             </h3>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-slate-500 dark:text-slate-400 tabular-nums">
-                {outputs.length} {outputs.length === 1 ? 'archivo generado' : 'archivos generados'}
-              </span>
+            <div className="flex items-center gap-2">
               {outputs.length > 1 && (
                 <button
                   type="button"
@@ -106,6 +105,14 @@ export function OutputPanel({
                   <span>Descargar todos (.zip)</span>
                 </button>
               )}
+              <button
+                type="button"
+                onClick={onDismissOutputs}
+                className="p-1 rounded-md text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800"
+                aria-label="Cerrar resultado"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
           </div>
 
@@ -115,9 +122,9 @@ export function OutputPanel({
               return (
                 <li
                   key={item.id}
-                  className="px-4 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                  className="px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                 >
-                  <div className="min-w-0 space-y-1">
+                  <div className="min-w-0 space-y-0.5">
                     <div className="flex items-center gap-2">
                       {item.encrypted ? (
                         <Lock className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0" />
@@ -145,8 +152,6 @@ export function OutputPanel({
                       >
                         {delta.label}
                       </span>
-                      <span aria-hidden="true">·</span>
-                      <span className="font-mono">{item.durationMs} ms</span>
                     </div>
                   </div>
 
