@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Notification, ipcMain, protocol, shell } = require('electron');
+const { app, BrowserWindow, Notification, dialog, ipcMain, protocol, shell } = require('electron');
 const { execFile, spawn } = require('child_process');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -7,8 +7,48 @@ const https = require('https');
 const os = require('os');
 const path = require('path');
 
-// Evita pantallas negras por incompatibilidad de aceleración GPU (D3D/ANGLE) en Windows 7–11 y ejecutables Portables
+// Evita cierres abruptos o pantallas negras por incompatibilidad GPU / sandbox en Windows 7–11 (Chromium 108)
 app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-gpu-compositing');
+app.commandLine.appendSwitch('disable-gpu-sandbox');
+app.commandLine.appendSwitch('no-sandbox');
+app.commandLine.appendSwitch('disable-dev-shm-usage');
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.speedpdf.desktop');
+}
+
+function appendCrashLog(context, err) {
+  try {
+    const baseDir = app.isReady() ? app.getPath('userData') : os.tmpdir();
+    fs.mkdirSync(baseDir, { recursive: true });
+    const logPath = path.join(baseDir, 'speedpdf-crash.log');
+    const detail = err instanceof Error ? err.stack || err.message : String(err);
+    const entry = `[${new Date().toISOString()}] [${context}] ${detail}\n`;
+    fs.appendFileSync(logPath, entry, 'utf8');
+  } catch {
+    // ignore logging failure
+  }
+}
+
+process.on('uncaughtException', (err) => {
+  appendCrashLog('uncaughtException', err);
+  if (app.isReady()) {
+    try {
+      dialog.showErrorBox(
+        'SPEED.PDF — Error inesperado',
+        err instanceof Error ? err.message : String(err)
+      );
+    } catch {
+      // ignore
+    }
+  }
+});
+
+process.on('unhandledRejection', (reason) => {
+  appendCrashLog('unhandledRejection', reason);
+});
 
 // Registrar el protocolo app:// como origen estándar y seguro antes de app.whenReady()
 protocol.registerSchemesAsPrivileged([
@@ -411,9 +451,12 @@ function parseCliArgs(argv) {
       customUi = true;
     } else if (arg.startsWith('--input=')) {
       const filePath = arg.slice('--input='.length).replace(/^"|"$/g, '');
-      if (filePath) files.push(filePath);
-    } else if (!arg.startsWith('--')) {
-      files.push(arg.replace(/^"|"$/g, ''));
+      if (filePath && fs.existsSync(filePath)) files.push(filePath);
+    } else if (!arg.startsWith('-') && !arg.startsWith('/')) {
+      const cleaned = arg.replace(/^"|"$/g, '');
+      if (cleaned && fs.existsSync(cleaned)) {
+        files.push(cleaned);
+      }
     }
   }
 
@@ -510,8 +553,19 @@ function createProgressWindow(initialState) {
 
 function revealMainWindow() {
   launchedHeadlessForCli = false;
+  if (headlessQuitTimer) {
+    clearTimeout(headlessQuitTimer);
+    headlessQuitTimer = null;
+  }
+  if (launchBatchTimer) {
+    clearTimeout(launchBatchTimer);
+    launchBatchTimer = null;
+  }
   closeProgressWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    createMainWindow(false);
+    return;
+  }
   if (!mainWindow.isVisible()) mainWindow.show();
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.focus();
@@ -623,11 +677,14 @@ function hasValidRuntimeForExe(exePath) {
 
 function findInstalledSpeedPdfExe() {
   const candidates = [];
-  if (process.env.LOCALAPPDATA) {
-    candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'SPEED.PDF', 'SPEED.PDF.exe'));
-  }
   if (process.env.ProgramFiles) {
     candidates.push(path.join(process.env.ProgramFiles, 'SPEED.PDF', 'SPEED.PDF.exe'));
+  }
+  if (process.env['ProgramFiles(x86)']) {
+    candidates.push(path.join(process.env['ProgramFiles(x86)'], 'SPEED.PDF', 'SPEED.PDF.exe'));
+  }
+  if (process.env.LOCALAPPDATA) {
+    candidates.push(path.join(process.env.LOCALAPPDATA, 'Programs', 'SPEED.PDF', 'SPEED.PDF.exe'));
   }
   for (const candidate of candidates) {
     if (hasValidRuntimeForExe(candidate)) {
@@ -927,16 +984,31 @@ async function getWindowsShellStatus() {
   }
 }
 
+function getShellDisabledFlagPath() {
+  return path.join(app.getPath('userData'), 'shell-disabled.flag');
+}
+
 // Mantiene sincronizada la ruta del ejecutable y repara rutas temporales (%TEMP%) o dañadas
 async function refreshShellMenuIfOutdated() {
   if (process.platform !== 'win32' || !app.isPackaged) return;
   try {
-    const pdfOut = await runRegCommand([
-      'query',
-      'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
-      '/v',
-      'Icon',
-    ]);
+    const preferredExe = getDesktopExePath();
+    if (isTempExecutablePath(preferredExe) || !hasValidRuntimeForExe(preferredExe)) {
+      return;
+    }
+
+    let pdfOut = '';
+    try {
+      pdfOut = await runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\SpeedPdfMenu',
+        '/v',
+        'Icon',
+      ]);
+    } catch {
+      pdfOut = '';
+    }
+
     let batchOut = '';
     try {
       batchOut = await runRegCommand([
@@ -951,9 +1023,12 @@ async function refreshShellMenuIfOutdated() {
 
     const registeredPdfExe = extractExeFromRegOutput(pdfOut);
     const registeredBatchExe = extractExeFromRegOutput(batchOut);
-    const preferredExe = getDesktopExePath();
 
-    if (isTempExecutablePath(preferredExe) || !hasValidRuntimeForExe(preferredExe)) {
+    if (!registeredPdfExe) {
+      // Si es una instalación fija y el usuario no desactivó explícitamente el menú, integrarlo en HKCU
+      if (!process.env.PORTABLE_EXECUTABLE_FILE && !fs.existsSync(getShellDisabledFlagPath())) {
+        await importRegContent(buildInstallRegContent(preferredExe));
+      }
       return;
     }
 
@@ -990,8 +1065,8 @@ async function refreshShellMenuIfOutdated() {
     if (pdfNeedsRepair || batchNeedsRepair) {
       await importRegContent(buildInstallRegContent(preferredExe));
     }
-  } catch {
-    // El menú contextual aún no está activado por el usuario
+  } catch (err) {
+    appendCrashLog('refreshShellMenuIfOutdated', err);
   }
 }
 
@@ -1112,11 +1187,21 @@ function createMainWindow(startHidden) {
     'did-fail-load',
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return;
+      appendCrashLog('did-fail-load', `${errorCode} ${errorDescription} (${validatedURL})`);
       revealMainWindow();
       const html = `<!doctype html><html lang="es"><body style="font-family:sans-serif;background:#0f172a;color:#f8fafc;padding:32px;"><h2>No se pudo iniciar SPEED.PDF</h2><p>${errorDescription} (${errorCode})</p><p style="color:#94a3b8;font-size:12px;">${validatedURL}</p></body></html>`;
       mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
     }
   );
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    if (details && details.reason === 'clean-exit') return;
+    appendCrashLog('render-process-gone', JSON.stringify(details));
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.isVisible()) mainWindow.show();
+    const html = `<!doctype html><html lang="es"><body style="font-family:Segoe UI,sans-serif;background:#0f172a;color:#f8fafc;padding:32px;"><h2>La interfaz de SPEED.PDF se detuvo inesperadamente</h2><p style="color:#cbd5e1;">Motivo: ${details?.reason || 'desconocido'} (código ${details?.exitCode ?? -1})</p><button onclick="location.href='app://speedpdf/index.html'" style="margin-top:16px;padding:10px 16px;border-radius:8px;border:none;background:#2563eb;color:#fff;font-weight:600;cursor:pointer;">Reintentar carga</button></body></html>`;
+    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  });
 
   mainWindow.webContents.on('before-input-event', (_event, input) => {
     if (input.key === 'F12' && input.type === 'keyDown') {
@@ -1140,6 +1225,12 @@ if (!gotSingleInstanceLock) {
       enqueueLaunchPayload(payload);
     } else {
       revealMainWindow();
+    }
+  });
+
+  app.on('child-process-gone', (_event, details) => {
+    if (details && details.reason !== 'clean-exit') {
+      appendCrashLog('child-process-gone', JSON.stringify(details));
     }
   });
 
@@ -1316,6 +1407,7 @@ ipcMain.handle('speedpdf:install-shell-menu', async () => {
       'Falta ffmpeg.dll junto al ejecutable. Reinstala SPEED.PDF-Setup o revisa si Windows Defender bloqueó ffmpeg.dll.'
     );
   }
+  await fsp.unlink(getShellDisabledFlagPath()).catch(() => {});
   await importRegContent(buildInstallRegContent(exePath));
   return getWindowsShellStatus();
 });
@@ -1324,6 +1416,7 @@ ipcMain.handle('speedpdf:uninstall-shell-menu', async () => {
   if (process.platform !== 'win32') {
     return getWindowsShellStatus();
   }
+  await fsp.writeFile(getShellDisabledFlagPath(), '1', 'utf8').catch(() => {});
   await importRegContent(buildUninstallRegContent());
   return getWindowsShellStatus();
 });
@@ -1403,7 +1496,18 @@ ipcMain.handle('speedpdf:install-update', async (_event, { downloadUrl, fileName
         `$app = '${escapePsSingleQuoted(relaunchExe)}'`,
         "Start-Process -FilePath $inst -ArgumentList '/S' -Wait",
         'Remove-Item -LiteralPath $inst -Force -ErrorAction SilentlyContinue',
-        'if (Test-Path -LiteralPath $app) { Start-Process -FilePath $app }',
+        '$launchCandidates = @(',
+        '  "$env:ProgramFiles\\SPEED.PDF\\SPEED.PDF.exe",',
+        '  "${env:ProgramFiles(x86)}\\SPEED.PDF\\SPEED.PDF.exe",',
+        '  "$env:LOCALAPPDATA\\Programs\\SPEED.PDF\\SPEED.PDF.exe",',
+        '  $app',
+        ')',
+        'foreach ($cand in $launchCandidates) {',
+        '  if ($cand -and (Test-Path -LiteralPath $cand)) {',
+        '    Start-Process -FilePath $cand',
+        '    break',
+        '  }',
+        '}',
         'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
       ];
     }

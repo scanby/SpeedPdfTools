@@ -1,4 +1,11 @@
 !macro customInstall
+  ; Accesos directos en Menú Inicio (Programa + Desinstalador)
+  SetShellVarContext all
+  CreateDirectory "$SMPROGRAMS\SPEED.PDF"
+  CreateShortCut "$SMPROGRAMS\SPEED.PDF\SPEED.PDF.lnk" "$INSTDIR\SPEED.PDF.exe" "" "$INSTDIR\SPEED.PDF.exe" 0
+  CreateShortCut "$SMPROGRAMS\SPEED.PDF\Desinstalar SPEED.PDF.lnk" "$INSTDIR\Uninstall SPEED.PDF.exe" "" "$INSTDIR\Uninstall SPEED.PDF.exe" 0
+  SetShellVarContext current
+
   ; Limpia entradas planas de versiones anteriores (v0.1.0) si existen
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.docx\shell\SpeedPdfAutoConvert"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.jpg\shell\SpeedPdfAutoConvert"
@@ -132,6 +139,12 @@
 !macroend
 
 !macro customUnInstall
+  SetShellVarContext all
+  Delete "$SMPROGRAMS\SPEED.PDF\SPEED.PDF.lnk"
+  Delete "$SMPROGRAMS\SPEED.PDF\Desinstalar SPEED.PDF.lnk"
+  RMDir "$SMPROGRAMS\SPEED.PDF"
+  SetShellVarContext current
+
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.pdf\shell\SpeedPdfMenu"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.docx\shell\SpeedPdfMenu"
   DeleteRegKey HKCU "Software\Classes\SystemFileAssociations\.jpg\shell\SpeedPdfMenu"
