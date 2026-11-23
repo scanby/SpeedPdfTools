@@ -1,14 +1,21 @@
 import {
   AlignmentType,
+  BorderStyle,
   Document,
   HeadingLevel,
   ISectionOptions,
   ImageRun,
   Packer,
-  PageBreak,
+  PageOrientation,
   Paragraph,
-  TabStopType,
+  ShadingType,
+  Table,
+  TableCell,
+  TableLayoutType,
+  TableRow,
   TextRun,
+  VerticalAlign,
+  WidthType,
 } from 'docx';
 import mammoth from 'mammoth';
 import { PDFDocument, PDFFont, PageSizes, StandardFonts, rgb } from 'pdf-lib';
@@ -16,24 +23,16 @@ import { ProgressState, WordConversionSettings } from '../types/speedpdf';
 import { getDesktopBridge } from './desktopBridge';
 import { sanitizeWinAnsiText, stripExtension, yieldToMain } from './formatters';
 import { computeClampedRenderViewport, renderPageToCanvas } from './pdfEngine';
+import {
+  ExtractedLine,
+  ExtractedSpan,
+  PageLayoutNode,
+  RectBox,
+  buildStructuredPageLayout,
+  extractPageSpansAndVisuals,
+  hexLuminance,
+} from './pdfLayoutExtractor';
 import { formatPdfOpenError, openPdfDocument } from './pdfjsSetup';
-
-interface ExtractedSpan {
-  x: number;
-  width: number;
-  text: string;
-  fontSize: number;
-  bold: boolean;
-  italic: boolean;
-}
-
-interface ExtractedLine {
-  y: number;
-  minX: number;
-  maxX: number;
-  avgFontSize: number;
-  spans: ExtractedSpan[];
-}
 
 function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.94): Promise<Uint8Array> {
   return new Promise((resolve, reject) => {
@@ -51,18 +50,76 @@ function canvasToJpegBytes(canvas: HTMLCanvasElement, quality = 0.94): Promise<U
   });
 }
 
-function detectFontStyle(
-  fontName: string,
-  fontFamily?: string
-): { bold: boolean; italic: boolean } {
-  const combined = `${fontName} ${fontFamily || ''}`;
-  const bold = /bold|black|heavy|semibold|demi|700|800|900/i.test(combined);
-  const italic = /italic|oblique|slant/i.test(combined);
-  return { bold, italic };
+function canvasCropToPngBytes(
+  sourceCanvas: HTMLCanvasElement,
+  box: RectBox,
+  pageW: number,
+  pageH: number
+): Promise<Uint8Array | null> {
+  if (typeof document === 'undefined') return Promise.resolve(null);
+  const scaleX = sourceCanvas.width / Math.max(1, pageW);
+  const scaleY = sourceCanvas.height / Math.max(1, pageH);
+  const sx = Math.max(0, Math.floor(box.x0 * scaleX));
+  const sy = Math.max(0, Math.floor(box.y0 * scaleY));
+  const sw = Math.max(1, Math.min(sourceCanvas.width - sx, Math.ceil((box.x1 - box.x0) * scaleX)));
+  const sh = Math.max(1, Math.min(sourceCanvas.height - sy, Math.ceil((box.y1 - box.y0) * scaleY)));
+  if (sw < 4 || sh < 4) return Promise.resolve(null);
+
+  const crop = document.createElement('canvas');
+  crop.width = sw;
+  crop.height = sh;
+  const ctx = crop.getContext('2d');
+  if (!ctx) {
+    crop.width = 0;
+    crop.height = 0;
+    return Promise.resolve(null);
+  }
+  ctx.drawImage(sourceCanvas, sx, sy, sw, sh, 0, 0, sw, sh);
+
+  return new Promise((resolve) => {
+    crop.toBlob(
+      async (blob) => {
+        crop.width = 0;
+        crop.height = 0;
+        if (!blob) {
+          resolve(null);
+          return;
+        }
+        resolve(new Uint8Array(await blob.arrayBuffer()));
+      },
+      'image/png'
+    );
+  });
 }
 
-function buildLineRuns(line: ExtractedLine, baseBodyPt: number, isHeading = false): TextRun[] {
-  const sorted = [...line.spans].sort((a, b) => a.x - b.x);
+function ptToTwips(pt: number): number {
+  return Math.max(0, Math.round(pt * 20));
+}
+
+function buildLinePlainText(line: ExtractedLine): string {
+  const sorted = [...line.spans].sort((a, b) => a.x0 - b.x0);
+  let out = '';
+  for (let i = 0; i < sorted.length; i++) {
+    const span = sorted[i];
+    if (i > 0) {
+      const prev = sorted[i - 1];
+      const gap = span.x0 - prev.x1;
+      const spaceThreshold = Math.max(1.6, span.fontSize * 0.2);
+      if (gap >= spaceThreshold && !prev.text.endsWith(' ') && !span.text.startsWith(' ')) {
+        out += ' ';
+      }
+    }
+    out += span.text;
+  }
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+function buildLineRuns(
+  line: ExtractedLine,
+  medianBodyPt: number,
+  options: { isHeading?: boolean; forceColorHex?: string } = {}
+): TextRun[] {
+  const sorted = [...line.spans].sort((a, b) => a.x0 - b.x0);
   const runs: TextRun[] = [];
 
   for (let i = 0; i < sorted.length; i++) {
@@ -71,13 +128,9 @@ function buildLineRuns(line: ExtractedLine, baseBodyPt: number, isHeading = fals
 
     if (i > 0) {
       const prev = sorted[i - 1];
-      const prevEnd = prev.x + Math.max(0, prev.width);
-      const gap = span.x - prevEnd;
-      const spaceThreshold = Math.max(1.8, span.fontSize * 0.22);
-      const tabThreshold = Math.max(18, span.fontSize * 1.45);
-      if (gap >= tabThreshold) {
-        prefix = '\t';
-      } else if (gap >= spaceThreshold && !prev.text.endsWith(' ') && !span.text.startsWith(' ')) {
+      const gap = span.x0 - prev.x1;
+      const spaceThreshold = Math.max(1.6, span.fontSize * 0.2);
+      if (gap >= spaceThreshold && !prev.text.endsWith(' ') && !span.text.startsWith(' ')) {
         prefix = ' ';
       }
     }
@@ -85,30 +138,381 @@ function buildLineRuns(line: ExtractedLine, baseBodyPt: number, isHeading = fals
     const runText = `${prefix}${span.text}`;
     if (!runText) continue;
 
-    if (isHeading) {
-      runs.push(
-        new TextRun({
-          text: runText,
-          bold: true,
-          italics: span.italic,
-        })
-      );
-    } else {
-      const computedHalfPts = Math.max(16, Math.min(56, Math.round(span.fontSize * 2)));
-      const targetSize =
-        Math.abs(span.fontSize - baseBodyPt) <= 2.2 ? baseBodyPt * 2 : computedHalfPts;
-      runs.push(
-        new TextRun({
-          text: runText,
-          bold: span.bold,
-          italics: span.italic,
-          size: targetSize,
-        })
-      );
-    }
+    const effectiveSizePt =
+      Math.abs(span.fontSize - medianBodyPt) <= 0.65 ? medianBodyPt : span.fontSize;
+    const halfPts = Math.max(13, Math.min(84, Math.round(effectiveSizePt * 2)));
+    const color = options.forceColorHex || span.colorHex || '1E293B';
+
+    runs.push(
+      new TextRun({
+        text: runText,
+        font: span.fontFamily,
+        bold: options.isHeading ? true : span.bold,
+        italics: span.italic,
+        size: halfPts,
+        color,
+      })
+    );
   }
 
   return runs;
+}
+
+const NO_TABLE_BORDERS = {
+  top: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+  bottom: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+  left: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+  right: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+  insideHorizontal: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+  insideVertical: { style: BorderStyle.NONE, size: 0, color: 'auto' },
+};
+
+const SUBTLE_GRID_BORDERS = {
+  top: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+  bottom: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+  left: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+  right: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+  insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+  insideVertical: { style: BorderStyle.SINGLE, size: 4, color: 'CBD5E1' },
+};
+
+function renderProseLinesToParagraphs(
+  lines: ExtractedLine[],
+  region: RectBox,
+  medianBodyPt: number,
+  bgHex?: string
+): Paragraph[] {
+  if (lines.length === 0) return [];
+  const out: Paragraph[] = [];
+  const blockLeft = Math.min(...lines.map((l) => l.minX));
+  const blockRight = Math.max(region.x1, ...lines.map((l) => l.maxX));
+  const blockWidth = Math.max(40, blockRight - blockLeft);
+
+  const contrastColor =
+    bgHex && hexLuminance(bgHex) < 0.42 ? 'FFFFFF' : undefined;
+  const paragraphShading = bgHex
+    ? { type: ShadingType.CLEAR, color: 'auto', fill: bgHex }
+    : undefined;
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const plainLine = buildLinePlainText(line);
+    if (!plainLine) {
+      i++;
+      continue;
+    }
+
+    const leftOffset = Math.max(0, line.minX - region.x0);
+    const rightSpace = Math.max(0, blockRight - line.maxX);
+    const lineSpanW = Math.max(1, line.maxX - line.minX);
+
+    const isCentered =
+      blockWidth > 120 &&
+      Math.abs(line.minX - region.x0 - rightSpace) <= 22 &&
+      lineSpanW < blockWidth * 0.78 &&
+      leftOffset > blockWidth * 0.12;
+    const isRightAligned =
+      !isCentered &&
+      blockWidth > 120 &&
+      rightSpace <= 16 &&
+      leftOffset > blockWidth * 0.42;
+    const isBullet = /^([•▪‣◦\-*–]|\d+[.)]|[a-zA-Z][.)])\s+/.test(plainLine);
+
+    if (line.avgFontSize >= medianBodyPt * 1.38 && plainLine.length < 130) {
+      out.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_1,
+          alignment: isCentered
+            ? AlignmentType.CENTER
+            : isRightAligned
+            ? AlignmentType.RIGHT
+            : AlignmentType.LEFT,
+          indent: !isCentered && !isRightAligned && leftOffset > 12 ? { left: ptToTwips(leftOffset) } : undefined,
+          shading: paragraphShading,
+          spacing: { before: 140, after: 80 },
+          children: buildLineRuns(line, medianBodyPt, {
+            isHeading: true,
+            forceColorHex: contrastColor,
+          }),
+        })
+      );
+      i++;
+      continue;
+    }
+
+    if (line.avgFontSize >= medianBodyPt * 1.15 && plainLine.length < 150) {
+      out.push(
+        new Paragraph({
+          heading: HeadingLevel.HEADING_2,
+          alignment: isCentered
+            ? AlignmentType.CENTER
+            : isRightAligned
+            ? AlignmentType.RIGHT
+            : AlignmentType.LEFT,
+          indent: !isCentered && !isRightAligned && leftOffset > 12 ? { left: ptToTwips(leftOffset) } : undefined,
+          shading: paragraphShading,
+          spacing: { before: 110, after: 60 },
+          children: buildLineRuns(line, medianBodyPt, {
+            isHeading: true,
+            forceColorHex: contrastColor,
+          }),
+        })
+      );
+      i++;
+      continue;
+    }
+
+    const mergedRuns: TextRun[] = [
+      ...buildLineRuns(line, medianBodyPt, { forceColorHex: contrastColor }),
+    ];
+    let currentLine = line;
+    let wrappedLineCount = 1;
+
+    while (!isCentered && !isRightAligned && i + 1 < lines.length) {
+      const nextLine = lines[i + 1];
+      const verticalGap = nextLine.ty - currentLine.ty;
+      const maxNormalStep = Math.max(currentLine.avgFontSize, nextLine.avgFontSize) * 1.62;
+      const nextPlain = buildLinePlainText(nextLine);
+      const nextIsHeading =
+        nextLine.avgFontSize >= medianBodyPt * 1.15 && nextPlain.length < 150;
+      const nextIsBullet = /^([•▪‣◦\-*–]|\d+[.)]|[a-zA-Z][.)])\s+/.test(nextPlain);
+
+      const sameStartIndent = isBullet
+        ? nextLine.minX >= line.minX - 6 && nextLine.minX <= line.minX + 26
+        : Math.abs(nextLine.minX - line.minX) <= 14;
+      const sameFontScale = Math.abs(nextLine.avgFontSize - currentLine.avgFontSize) <= 1.5;
+
+      // Verificar si la línea actual realmente llegó cerca del borde derecho del bloque
+      // (si terminó muy corta y no es parte de un párrafo ya en curso, es un salto intencional como dirección o firma)
+      const currentReachedNearEdge =
+        currentLine.maxX >= blockRight - Math.max(36, currentLine.avgFontSize * 5.2);
+      const nextRightMargin = Math.max(0, blockRight - nextLine.maxX);
+      const nextNotRightAligned = !(nextRightMargin <= 16 && nextLine.minX - region.x0 > blockWidth * 0.45);
+
+      if (
+        verticalGap > 0 &&
+        verticalGap <= maxNormalStep &&
+        sameStartIndent &&
+        sameFontScale &&
+        !nextIsHeading &&
+        !nextIsBullet &&
+        nextNotRightAligned &&
+        (currentReachedNearEdge || plainLine.length >= 52)
+      ) {
+        const lastRunColor = contrastColor || nextLine.spans[0]?.colorHex || '1E293B';
+        mergedRuns.push(
+          new TextRun({
+            text: ' ',
+            font: nextLine.spans[0]?.fontFamily || 'Calibri',
+            size: Math.max(13, Math.round(nextLine.avgFontSize * 2)),
+            color: lastRunColor,
+          })
+        );
+        mergedRuns.push(
+          ...buildLineRuns(nextLine, medianBodyPt, { forceColorHex: contrastColor })
+        );
+        currentLine = nextLine;
+        wrappedLineCount++;
+        i++;
+      } else {
+        break;
+      }
+    }
+
+    const indentLeftTwips =
+      !isCentered && !isRightAligned && leftOffset > 10 ? ptToTwips(leftOffset) : 0;
+    const isJustified =
+      !isCentered &&
+      !isRightAligned &&
+      !isBullet &&
+      wrappedLineCount >= 2 &&
+      currentLine.maxX < blockRight - 24 &&
+      line.maxX >= blockRight - 28;
+
+    out.push(
+      new Paragraph({
+        alignment: isCentered
+          ? AlignmentType.CENTER
+          : isRightAligned
+          ? AlignmentType.RIGHT
+          : isJustified
+          ? AlignmentType.JUSTIFIED
+          : AlignmentType.LEFT,
+        indent: indentLeftTwips > 0 ? { left: indentLeftTwips } : undefined,
+        shading: paragraphShading,
+        spacing: {
+          after: isBullet ? 55 : 85,
+          line: 264,
+        },
+        children: mergedRuns,
+      })
+    );
+    i++;
+  }
+
+  return out;
+}
+
+function scaleWidthsToAvailableTwips(widthsPt: number[], targetTwips: number): number[] {
+  const sumPt = widthsPt.reduce((a, b) => a + b, 0) || 1;
+  const rawTwips = widthsPt.map((w) => Math.max(360, Math.round((w / sumPt) * targetTwips)));
+  const currentTotal = rawTwips.reduce((a, b) => a + b, 0);
+  if (rawTwips.length > 0 && currentTotal !== targetTwips) {
+    rawTwips[rawTwips.length - 1] = Math.max(
+      360,
+      rawTwips[rawTwips.length - 1] + (targetTwips - currentTotal)
+    );
+  }
+  return rawTwips;
+}
+
+async function renderLayoutNodesToDocxChildren(
+  nodes: PageLayoutNode[],
+  availWidthTwips: number,
+  medianBodyPt: number,
+  getCroppedImageBytes: (box: RectBox) => Promise<Uint8Array | null>
+): Promise<(Paragraph | Table)[]> {
+  const children: (Paragraph | Table)[] = [];
+
+  for (const node of nodes) {
+    if (node.kind === 'prose') {
+      children.push(
+        ...renderProseLinesToParagraphs(node.lines, node.region, medianBodyPt, node.bgHex)
+      );
+      continue;
+    }
+
+    if (node.kind === 'image') {
+      const pngBytes = await getCroppedImageBytes(node.box);
+      if (pngBytes) {
+        const boxW = Math.max(24, node.box.x1 - node.box.x0);
+        const boxH = Math.max(24, node.box.y1 - node.box.y0);
+        const maxWidthPx = Math.max(80, Math.round((availWidthTwips / 1440) * 96));
+        const rawW = Math.round(boxW * (96 / 72));
+        const rawH = Math.round(boxH * (96 / 72));
+        const ratio = Math.min(1, maxWidthPx / Math.max(1, rawW));
+        children.push(
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { before: 80, after: 80 },
+            children: [
+              new ImageRun({
+                type: 'png',
+                data: pngBytes,
+                transformation: {
+                  width: Math.max(24, Math.round(rawW * ratio)),
+                  height: Math.max(24, Math.round(rawH * ratio)),
+                },
+              }),
+            ],
+          })
+        );
+      }
+      continue;
+    }
+
+    if (node.kind === 'table') {
+      const colWidthsTwips = scaleWidthsToAvailableTwips(node.colWidthsPt, availWidthTwips);
+      const tableRows = node.rows.map(
+        (row) =>
+          new TableRow({
+            tableHeader: row.isHeader,
+            children: row.cells.map((cell, cIdx) => {
+              const cellW = colWidthsTwips[cIdx] ?? Math.round(availWidthTwips / Math.max(1, node.colWidthsPt.length));
+              const contrastHex =
+                cell.bgHex && hexLuminance(cell.bgHex) < 0.42 ? 'FFFFFF' : undefined;
+              const cellParagraphs = cell.lines.map(
+                (line) =>
+                  new Paragraph({
+                    alignment:
+                      cell.align === 'center'
+                        ? AlignmentType.CENTER
+                        : cell.align === 'right'
+                        ? AlignmentType.RIGHT
+                        : AlignmentType.LEFT,
+                    spacing: { before: 20, after: 20 },
+                    children: buildLineRuns(line, medianBodyPt, {
+                      isHeading: row.isHeader,
+                      forceColorHex: contrastHex,
+                    }),
+                  })
+              );
+
+              return new TableCell({
+                width: { size: cellW, type: WidthType.DXA },
+                verticalAlign: VerticalAlign.CENTER,
+                margins: { top: 75, bottom: 75, left: 100, right: 100 },
+                shading: cell.bgHex
+                  ? { type: ShadingType.CLEAR, color: 'auto', fill: cell.bgHex }
+                  : undefined,
+                children:
+                  cellParagraphs.length > 0
+                    ? cellParagraphs
+                    : [new Paragraph({ children: [new TextRun('')] })],
+              });
+            }),
+          })
+      );
+
+      children.push(
+        new Table({
+          width: { size: availWidthTwips, type: WidthType.DXA },
+          layout: TableLayoutType.FIXED,
+          columnWidths: colWidthsTwips,
+          borders: node.hasBorders ? SUBTLE_GRID_BORDERS : NO_TABLE_BORDERS,
+          rows: tableRows,
+        })
+      );
+      children.push(new Paragraph({ spacing: { before: 0, after: 80 } }));
+      continue;
+    }
+
+    if (node.kind === 'columns') {
+      const colWidthsTwips = scaleWidthsToAvailableTwips(node.colWidthsPt, availWidthTwips);
+      const cells: TableCell[] = [];
+      for (let cIdx = 0; cIdx < node.columns.length; cIdx++) {
+        const colNodes = node.columns[cIdx];
+        const cellW = colWidthsTwips[cIdx] ?? Math.round(availWidthTwips / Math.max(1, node.columns.length));
+        const innerAvailTwips = Math.max(360, cellW - 140);
+        const cellChildren = await renderLayoutNodesToDocxChildren(
+          colNodes,
+          innerAvailTwips,
+          medianBodyPt,
+          getCroppedImageBytes
+        );
+        cells.push(
+          new TableCell({
+            width: { size: cellW, type: WidthType.DXA },
+            verticalAlign: VerticalAlign.TOP,
+            margins: {
+              top: 20,
+              bottom: 20,
+              left: cIdx === 0 ? 0 : 90,
+              right: cIdx === node.columns.length - 1 ? 0 : 90,
+            },
+            children:
+              cellChildren.length > 0
+                ? cellChildren
+                : [new Paragraph({ children: [new TextRun('')] })],
+          })
+        );
+      }
+
+      children.push(
+        new Table({
+          width: { size: availWidthTwips, type: WidthType.DXA },
+          layout: TableLayoutType.FIXED,
+          columnWidths: colWidthsTwips,
+          borders: NO_TABLE_BORDERS,
+          rows: [new TableRow({ children: cells })],
+        })
+      );
+      children.push(new Paragraph({ spacing: { before: 0, after: 60 } }));
+    }
+  }
+
+  return children;
 }
 
 export async function pdfToDocx(
@@ -153,18 +557,26 @@ export async function pdfToDocx(
           page.cleanup();
         }
 
-        const widthTwips = Math.max(1440, Math.round(baseViewport.width * 20));
-        const heightTwips = Math.max(1440, Math.round(baseViewport.height * 20));
+        const rawWTwips = Math.max(1440, Math.round(baseViewport.width * 20));
+        const rawHTwips = Math.max(1440, Math.round(baseViewport.height * 20));
+        const isLandscape = rawWTwips > rawHTwips;
         const widthPx = Math.max(100, Math.round(baseViewport.width * (96 / 72)));
         const heightPx = Math.max(100, Math.round(baseViewport.height * (96 / 72)));
 
         sections.push({
           properties: {
             page: {
-              size: {
-                width: widthTwips,
-                height: heightTwips,
-              },
+              size: isLandscape
+                ? {
+                    width: rawHTwips,
+                    height: rawWTwips,
+                    orientation: PageOrientation.LANDSCAPE,
+                  }
+                : {
+                    width: rawWTwips,
+                    height: rawHTwips,
+                    orientation: PageOrientation.PORTRAIT,
+                  },
               margin: {
                 top: 0,
                 right: 0,
@@ -223,237 +635,140 @@ export async function pdfToDocx(
       };
     }
 
-    // Modo editable mejorado (con estilo tipográfico, tabuladores de columnas y respaldo visual para escaneos)
-    const docParagraphs: Paragraph[] = [];
+    // Modo editable con reconstrucción geométrica XY-Cut (columnas, tablas reales, márgenes, colores e imágenes)
+    const sections: ISectionOptions[] = [];
+    const continuousChildren: (Paragraph | Table)[] = [];
     const defaultPageWTwips = settings.pageSize === 'letter' ? 12240 : 11906;
     const defaultPageHTwips = settings.pageSize === 'letter' ? 15840 : 16838;
-    const marginTwips = 1134; // ~2 cm
 
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
       onProgress({
         active: true,
         percent: Math.round(((pageNum - 1) / Math.max(1, totalPages)) * 85) + 5,
-        stage: `Extrayendo texto, estilos y estructura de página ${pageNum}/${totalPages}...`,
+        stage: `Reconstruyendo columnas, tablas y estructura de página ${pageNum}/${totalPages}...`,
         currentPage: pageNum,
         totalPages,
       });
 
       const page = await pdf.getPage(pageNum);
       const baseViewport = page.getViewport({ scale: 1 });
-      const textContent = await page.getTextContent();
-      const stylesMap = (textContent.styles || {}) as Record<string, { fontFamily?: string }>;
+      const pageW = Math.max(200, baseViewport.width);
+      const pageH = Math.max(200, baseViewport.height);
 
-      type PdfTextItem = Extract<(typeof textContent.items)[number], { str: string }>;
-      const rawItems = textContent.items.filter(
-        (item): item is PdfTextItem =>
-          'str' in item && typeof item.str === 'string' && item.str.trim().length > 0
-      );
+      const { spans, visuals } = await extractPageSpansAndVisuals(page, baseViewport);
 
-      if (rawItems.length < 3) {
-        // Página escaneada o puramente gráfica: incrustar captura nítida a 200 DPI
-        const { renderViewport } = computeClampedRenderViewport(page, 200, 0);
-        const canvas = await renderPageToCanvas(page, renderViewport, false);
-        let jpegBytes: Uint8Array;
-        try {
-          jpegBytes = await canvasToJpegBytes(canvas, 0.93);
-        } finally {
-          canvas.width = 0;
-          canvas.height = 0;
-        }
+      const rawPageWTwips = Math.max(2880, Math.min(31680, Math.round(pageW * 20)));
+      const rawPageHTwips = Math.max(2880, Math.min(31680, Math.round(pageH * 20)));
+      const isLandscape = rawPageWTwips > rawPageHTwips;
 
-        const contentWidthPx = Math.round(((defaultPageWTwips - marginTwips * 2) / 1440) * 96);
-        const maxHeightPx = Math.round(((defaultPageHTwips - marginTwips * 2) / 1440) * 96);
-        const ratio = Math.min(
-          contentWidthPx / Math.max(1, baseViewport.width),
-          maxHeightPx / Math.max(1, baseViewport.height)
-        );
-        docParagraphs.push(
-          new Paragraph({
-            alignment: AlignmentType.CENTER,
-            children: [
-              new ImageRun({
-                type: 'jpg',
-                data: jpegBytes,
-                transformation: {
-                  width: Math.max(80, Math.round(baseViewport.width * ratio)),
-                  height: Math.max(80, Math.round(baseViewport.height * ratio)),
-                },
-              }),
-            ],
-          })
-        );
-      } else {
-        const lines: ExtractedLine[] = [];
+      let pageChildren: (Paragraph | Table)[] = [];
+      let marginsPt = { top: 54, right: 54, bottom: 54, left: 54 };
 
-        for (const item of rawItems) {
-          const x = item.transform[4] ?? 0;
-          const y = item.transform[5] ?? 0;
-          const fontSize = Math.max(
-            6,
-            Math.hypot(item.transform[0] ?? 0, item.transform[1] ?? 0) || item.height || 11
+      if (spans.length === 0) {
+        // Página escaneada o puramente gráfica sin capa de texto: incrustar captura nítida a 200 DPI
+        if (typeof document !== 'undefined') {
+          const { renderViewport } = computeClampedRenderViewport(page, 200, 0);
+          const canvas = await renderPageToCanvas(page, renderViewport, false);
+          let jpegBytes: Uint8Array;
+          try {
+            jpegBytes = await canvasToJpegBytes(canvas, 0.93);
+          } finally {
+            canvas.width = 0;
+            canvas.height = 0;
+          }
+          const availWTwips = rawPageWTwips - 1440;
+          const availHTwips = rawPageHTwips - 1440;
+          const contentWidthPx = Math.round((availWTwips / 1440) * 96);
+          const maxHeightPx = Math.round((availHTwips / 1440) * 96);
+          const ratio = Math.min(
+            contentWidthPx / pageW,
+            maxHeightPx / pageH
           );
-          const spanWidth = Math.max(0, item.width || 0);
-          const styleInfo = stylesMap[item.fontName];
-          const { bold, italic } = detectFontStyle(item.fontName || '', styleInfo?.fontFamily);
-          const yTol = Math.max(2.8, fontSize * 0.36);
-
-          let existing = lines.find((l) => Math.abs(l.y - y) <= yTol);
-          const span: ExtractedSpan = {
-            x,
-            width: spanWidth,
-            text: item.str,
-            fontSize,
-            bold,
-            italic,
-          };
-
-          if (!existing) {
-            lines.push({
-              y,
-              minX: x,
-              maxX: x + spanWidth,
-              avgFontSize: fontSize,
-              spans: [span],
-            });
-          } else {
-            existing.spans.push(span);
-            existing.minX = Math.min(existing.minX, x);
-            existing.maxX = Math.max(existing.maxX, x + spanWidth);
-            existing.avgFontSize =
-              existing.spans.reduce((sum, s) => sum + s.fontSize, 0) / existing.spans.length;
-          }
-        }
-
-        lines.sort((a, b) => b.y - a.y);
-
-        const sizes = lines.map((l) => l.avgFontSize).sort((a, b) => a - b);
-        const medianSize = sizes.length > 0 ? sizes[Math.floor(sizes.length / 2)] : 11;
-        const pageW = Math.max(200, baseViewport.width);
-
-        // Agrupar líneas normales continuas en párrafos coherentes
-        let i = 0;
-        while (i < lines.length) {
-          const line = lines[i];
-          const runs = buildLineRuns(line, settings.fontSize, false);
-          const plainLineText = line.spans
-            .slice()
-            .sort((a, b) => a.x - b.x)
-            .map((s) => s.text)
-            .join(' ')
-            .replace(/\s+/g, ' ')
-            .trim();
-
-          if (!plainLineText) {
-            i++;
-            continue;
-          }
-
-          const sortedSpansForTabs = [...line.spans].sort((a, b) => a.x - b.x);
-          const hasTabs = sortedSpansForTabs.some((s, idx) => {
-            if (idx === 0) return false;
-            const prev = sortedSpansForTabs[idx - 1];
-            const gap = s.x - (prev.x + Math.max(0, prev.width));
-            return gap >= Math.max(18, s.fontSize * 1.45);
-          });
-          const leftMargin = line.minX;
-          const rightMargin = Math.max(0, pageW - line.maxX);
-          const isCentered =
-            Math.abs(leftMargin - rightMargin) < 26 &&
-            line.maxX - line.minX < pageW * 0.72 &&
-            leftMargin > pageW * 0.14;
-          const isRightAligned =
-            rightMargin < pageW * 0.16 && leftMargin > pageW * 0.48 && !isCentered;
-          const isBullet = /^([•▪‣◦\-*]|\d+[.)])\s+/.test(plainLineText);
-
-          if (line.avgFontSize >= medianSize * 1.42 && plainLineText.length < 120) {
-            docParagraphs.push(
-              new Paragraph({
-                heading: HeadingLevel.HEADING_1,
-                alignment: isCentered ? AlignmentType.CENTER : AlignmentType.LEFT,
-                spacing: { before: 220, after: 110 },
-                children: buildLineRuns(line, settings.fontSize, true),
-              })
-            );
-            i++;
-            continue;
-          }
-
-          if (line.avgFontSize >= medianSize * 1.16 && plainLineText.length < 140) {
-            docParagraphs.push(
-              new Paragraph({
-                heading: HeadingLevel.HEADING_2,
-                alignment: isCentered ? AlignmentType.CENTER : AlignmentType.LEFT,
-                spacing: { before: 160, after: 80 },
-                children: buildLineRuns(line, settings.fontSize, true),
-              })
-            );
-            i++;
-            continue;
-          }
-
-          // Combinar líneas sucesivas del mismo bloque de párrafo si tienen margen izquierdo similar y salto normal
-          const mergedRuns: TextRun[] = [...runs];
-          let currentLine = line;
-
-          while (
-            !isCentered &&
-            !isRightAligned &&
-            !isBullet &&
-            !hasTabs &&
-            i + 1 < lines.length
-          ) {
-            const nextLine = lines[i + 1];
-            const verticalGap = currentLine.y - nextLine.y;
-            const normalLineStep = currentLine.avgFontSize * 1.55;
-            const sameMargin = Math.abs(nextLine.minX - line.minX) <= 18;
-            const sameSize = Math.abs(nextLine.avgFontSize - currentLine.avgFontSize) <= 1.5;
-            const nextText = nextLine.spans
-              .map((s) => s.text)
-              .join(' ')
-              .trim();
-            const nextIsHeading = nextLine.avgFontSize >= medianSize * 1.16 && nextText.length < 140;
-            const nextIsBullet = /^([•▪‣◦\-*]|\d+[.)])\s+/.test(nextText);
-
-            if (
-              verticalGap > 0 &&
-              verticalGap <= normalLineStep &&
-              sameMargin &&
-              sameSize &&
-              !nextIsHeading &&
-              !nextIsBullet &&
-              plainLineText.length > 32
-            ) {
-              mergedRuns.push(new TextRun({ text: ' ', size: settings.fontSize * 2 }));
-              mergedRuns.push(...buildLineRuns(nextLine, settings.fontSize, false));
-              currentLine = nextLine;
-              i++;
-            } else {
-              break;
-            }
-          }
-
-          docParagraphs.push(
+          pageChildren.push(
             new Paragraph({
-              alignment: isCentered
-                ? AlignmentType.CENTER
-                : isRightAligned
-                ? AlignmentType.RIGHT
-                : AlignmentType.LEFT,
-              spacing: { after: isBullet ? 70 : 110, line: 276 },
-              tabStops: [
-                { type: TabStopType.LEFT, position: 2600 },
-                { type: TabStopType.LEFT, position: 5200 },
-                { type: TabStopType.LEFT, position: 7600 },
+              alignment: AlignmentType.CENTER,
+              children: [
+                new ImageRun({
+                  type: 'jpg',
+                  data: jpegBytes,
+                  transformation: {
+                    width: Math.max(80, Math.round(pageW * ratio)),
+                    height: Math.max(80, Math.round(pageH * ratio)),
+                  },
+                }),
               ],
-              children: mergedRuns,
             })
           );
-          i++;
+        }
+      } else {
+        const layout = buildStructuredPageLayout(spans, visuals, pageW, pageH);
+        marginsPt = layout.marginsPt;
+
+        const sizes = spans.map((s) => s.fontSize).sort((a, b) => a - b);
+        const medianBodyPt = sizes[Math.floor(sizes.length / 2)] || settings.fontSize || 11;
+        const availWidthTwips = Math.max(
+          1440,
+          rawPageWTwips - ptToTwips(marginsPt.left) - ptToTwips(marginsPt.right)
+        );
+
+        let renderedPageCanvas: HTMLCanvasElement | null = null;
+        if (layout.standaloneImages.length > 0 && typeof document !== 'undefined') {
+          try {
+            const { renderViewport } = computeClampedRenderViewport(page, 165, 0);
+            renderedPageCanvas = await renderPageToCanvas(page, renderViewport, false);
+          } catch {
+            renderedPageCanvas = null;
+          }
+        }
+
+        try {
+          pageChildren = await renderLayoutNodesToDocxChildren(
+            layout.nodes,
+            availWidthTwips,
+            medianBodyPt,
+            async (box) => {
+              if (!renderedPageCanvas) return null;
+              return canvasCropToPngBytes(renderedPageCanvas, box, pageW, pageH);
+            }
+          );
+        } finally {
+          if (renderedPageCanvas) {
+            renderedPageCanvas.width = 0;
+            renderedPageCanvas.height = 0;
+          }
         }
       }
 
-      if (settings.preservePageBreaks && pageNum < totalPages) {
-        docParagraphs.push(new Paragraph({ children: [new PageBreak()] }));
+      if (settings.preservePageBreaks) {
+        sections.push({
+          properties: {
+            page: {
+              size: isLandscape
+                ? {
+                    width: rawPageHTwips,
+                    height: rawPageWTwips,
+                    orientation: PageOrientation.LANDSCAPE,
+                  }
+                : {
+                    width: rawPageWTwips,
+                    height: rawPageHTwips,
+                    orientation: PageOrientation.PORTRAIT,
+                  },
+              margin: {
+                top: ptToTwips(marginsPt.top),
+                right: ptToTwips(marginsPt.right),
+                bottom: ptToTwips(marginsPt.bottom),
+                left: ptToTwips(marginsPt.left),
+              },
+            },
+          },
+          children:
+            pageChildren.length > 0
+              ? pageChildren
+              : [new Paragraph({ children: [new TextRun('')] })],
+        });
+      } else {
+        continuousChildren.push(...pageChildren);
       }
 
       page.cleanup();
@@ -463,7 +778,7 @@ export async function pdfToDocx(
     onProgress({
       active: true,
       percent: 94,
-      stage: 'Generando archivo Word (.docx) local...',
+      stage: 'Generando archivo Word (.docx) estructurado...',
       currentPage: totalPages,
       totalPages,
     });
@@ -471,25 +786,31 @@ export async function pdfToDocx(
     const wordDoc = new Document({
       creator: 'SPEED.PDF',
       title: stripExtension(file.name),
-      sections: [
-        {
-          properties: {
-            page: {
-              size: {
-                width: defaultPageWTwips,
-                height: defaultPageHTwips,
+      sections: settings.preservePageBreaks
+        ? sections
+        : [
+            {
+              properties: {
+                page: {
+                  size: {
+                    width: defaultPageWTwips,
+                    height: defaultPageHTwips,
+                    orientation: PageOrientation.PORTRAIT,
+                  },
+                  margin: {
+                    top: 1008,
+                    right: 1008,
+                    bottom: 1008,
+                    left: 1008,
+                  },
+                },
               },
-              margin: {
-                top: marginTwips,
-                right: marginTwips,
-                bottom: marginTwips,
-                left: marginTwips,
-              },
+              children:
+                continuousChildren.length > 0
+                  ? continuousChildren
+                  : [new Paragraph({ children: [new TextRun('')] })],
             },
-          },
-          children: docParagraphs,
-        },
-      ],
+          ],
     });
 
     const blob = await Packer.toBlob(wordDoc);

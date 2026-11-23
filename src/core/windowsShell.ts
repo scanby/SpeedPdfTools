@@ -116,6 +116,14 @@ export function generateInstallRegistryScript(config: RegistryConfig): string {
       '',
       '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\07_Organize\\command]',
       `@="\\"${exe}\\" --mode=organize --ui=custom --input=\\"%1\\""`,
+      '',
+      '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\08_Protect]',
+      '"MUIVerb"="Proteger PDF..."',
+      `"Icon"="${exe},0"`,
+      '"MultiSelectModel"="Player"',
+      '',
+      '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\08_Protect\\command]',
+      `@="\\"${exe}\\" --mode=protect --auto-convert --output-dir=source --input=\\"%1\\""`,
       ''
     );
   }

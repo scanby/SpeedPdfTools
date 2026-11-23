@@ -8,10 +8,12 @@ import {
   OrganizerPageItem,
   OrganizerSourceFile,
   ProgressState,
+  ProtectPdfSettings,
   QueueFileItem,
   UnlockPdfSettings,
 } from '../types/speedpdf';
 import { parsePageRange, stripExtension, yieldToMain } from './formatters';
+import { encryptPdfDocument } from './pdfEncrypt';
 
 const MAX_RENDER_SIDE = 4800;
 const MAX_RENDER_AREA = 20_000_000;
@@ -419,6 +421,100 @@ export async function unlockPdf(
     fileName: `${stripExtension(file.name)}_desprotegido.pdf`,
     pageCount: totalPages,
     wasProtected: true,
+  };
+}
+
+export async function protectPdf(
+  file: File,
+  settings: ProtectPdfSettings,
+  onProgress: (state: ProgressState) => void,
+  extraRotation = 0,
+  overrideOpenPassword?: string,
+  sourceOpenPassword?: string
+): Promise<{ blob: Blob; fileName: string; pageCount: number }> {
+  const openPassword = (
+    overrideOpenPassword !== undefined ? overrideOpenPassword : settings.openPassword
+  ).trim();
+  const ownerPassword = settings.ownerPassword.trim();
+
+  if (!openPassword && !ownerPassword) {
+    throw new Error('Ingresa una contraseña para proteger el archivo PDF.');
+  }
+
+  const sourceBytes = new Uint8Array(await file.arrayBuffer());
+  const rotNorm = snapRotation90(extraRotation);
+
+  onProgress({
+    active: true,
+    percent: 18,
+    stage: `Preparando ${file.name} para cifrado estándar PDF...`,
+  });
+
+  let doc: PDFDocument | null = null;
+  let needsRebuild = false;
+
+  try {
+    const rawDoc = await PDFDocument.load(sourceBytes, { ignoreEncryption: true });
+    if (!rawDoc.isEncrypted) {
+      doc = rawDoc;
+    } else {
+      needsRebuild = true;
+    }
+  } catch {
+    needsRebuild = true;
+  }
+
+  if (needsRebuild || !doc) {
+    doc = await rebuildCleanPdfViaPdfJs(sourceBytes, {
+      fileName: file.name,
+      password: sourceOpenPassword,
+      dpi: 200,
+      jpegQuality: 0.93,
+      extraRotation: rotNorm,
+      onProgress,
+      stagePrefix: 'Normalizando página antes de proteger',
+    });
+  } else if (rotNorm !== 0) {
+    const pageCount = doc.getPageCount();
+    for (let i = 0; i < pageCount; i++) {
+      applyPdfPageRotation(doc.getPage(i), rotNorm);
+    }
+  }
+
+  const totalPages = doc.getPageCount();
+
+  if (settings.stripMetadata) {
+    clearMetadata(doc);
+  }
+
+  onProgress({
+    active: true,
+    percent: 78,
+    stage: `Aplicando contraseña y permisos RC4-128 a ${file.name}...`,
+    currentPage: totalPages,
+    totalPages,
+  });
+
+  const encryptedBytes = await encryptPdfDocument(doc, {
+    openPassword,
+    ownerPassword,
+    allowPrinting: settings.allowPrinting,
+    allowCopying: settings.allowCopying,
+    allowModifying: settings.allowModifying,
+  });
+
+  onProgress({
+    active: false,
+    percent: 100,
+    stage: 'Completado',
+    currentPage: totalPages,
+    totalPages,
+  });
+
+  return {
+    blob: new Blob([new Uint8Array(encryptedBytes)], { type: 'application/pdf' }),
+    fileName: `${stripExtension(file.name)}_protegido.pdf`,
+    pageCount: totalPages,
   };
 }
 

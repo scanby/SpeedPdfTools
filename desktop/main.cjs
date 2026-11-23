@@ -785,6 +785,13 @@ function buildInstallRegContent(exePath) {
     '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\07_Organize\\command]',
     `@="\\"${exe}\\" --mode=organize --ui=custom --input=\\"%1\\""`,
     '',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\08_Protect]',
+    '"MUIVerb"="Proteger PDF..."',
+    `"Icon"="${exe},0"`,
+    '"MultiSelectModel"="Player"',
+    '[HKEY_CURRENT_USER\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\08_Protect\\command]',
+    `@="\\"${exe}\\" --mode=protect --auto-convert --output-dir=source --input=\\"%1\\""`,
+    '',
     '[HKEY_CURRENT_USER\\Software\\Classes\\SystemFileAssociations\\.docx\\shell\\SpeedPdfMenu]',
     '"MUIVerb"="SPEED.PDF"',
     `"Icon"="${exe},0"`,
@@ -1101,6 +1108,17 @@ async function refreshShellMenuIfOutdated() {
       organizeCmdOut = '';
     }
 
+    let protectCmdOut = '';
+    try {
+      protectCmdOut = await runRegCommand([
+        'query',
+        'HKCU\\Software\\Classes\\SpeedPdf.PdfMenu\\shell\\08_Protect\\command',
+        '/ve',
+      ]);
+    } catch {
+      protectCmdOut = '';
+    }
+
     const pdfNeedsRepair =
       !registeredPdfExe ||
       isTempExecutablePath(registeredPdfExe) ||
@@ -1116,7 +1134,8 @@ async function refreshShellMenuIfOutdated() {
     const commandsNeedUpgrade =
       !/--mode=pdf-to-img/i.test(jpgCmdOut) ||
       !/--mode=unlock/i.test(unlockCmdOut) ||
-      !/--mode=organize/i.test(organizeCmdOut);
+      !/--mode=organize/i.test(organizeCmdOut) ||
+      !/--mode=protect/i.test(protectCmdOut);
 
     if (pdfNeedsRepair || batchNeedsRepair || commandsNeedUpgrade) {
       await importRegContent(buildInstallRegContent(preferredExe));
@@ -2171,6 +2190,321 @@ ipcMain.handle('speedpdf:prompt-unlock-passwords', async (_event, params) => {
         const res = pendingUnlockPromptResolve;
         pendingUnlockPromptResolve = null;
         pendingUnlockPromptData = null;
+        res({ cancelled: true });
+      }
+    });
+  });
+});
+
+let protectPromptWindow = null;
+let pendingProtectPromptData = null;
+let pendingProtectPromptResolve = null;
+
+function buildProtectPromptWindowHtml() {
+  return `<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<title>SPEED.PDF — Proteger PDF con contraseña</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f172a;
+    color: #f8fafc;
+    overflow: hidden;
+  }
+  .wrap {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 18px 20px;
+    gap: 12px;
+  }
+  .top { display: flex; align-items: flex-start; gap: 12px; }
+  .badge-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    background: rgba(37, 99, 235, 0.2);
+    border: 1px solid rgba(59, 130, 246, 0.45);
+    color: #60a5fa;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+  .title { font-size: 15px; font-weight: 700; color: #f8fafc; }
+  .subtitle { font-size: 12px; color: #94a3b8; margin-top: 3px; line-height: 1.45; }
+  .err {
+    padding: 8px 11px;
+    border-radius: 7px;
+    background: rgba(239, 68, 68, 0.14);
+    border: 1px solid rgba(239, 68, 68, 0.45);
+    color: #fecaca;
+    font-size: 12px;
+    display: none;
+  }
+  .file-chip {
+    font-size: 12px;
+    color: #e2e8f0;
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 7px;
+    padding: 8px 10px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .field-box {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(30, 41, 59, 0.65);
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .field-label { font-size: 12px; font-weight: 600; color: #e2e8f0; }
+  .pw-row { display: flex; align-items: center; gap: 6px; }
+  .pw-input {
+    flex: 1;
+    padding: 8px 10px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: #0f172a;
+    color: #f8fafc;
+    font-size: 13px;
+    outline: none;
+  }
+  .pw-input:focus { border-color: #3b82f6; }
+  .toggle-btn {
+    padding: 7px 10px;
+    border-radius: 6px;
+    border: 1px solid #475569;
+    background: #1e293b;
+    color: #cbd5e1;
+    font-size: 11px;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+  .toggle-btn:hover { background: #334155; color: #fff; }
+  .perms {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 12px;
+    background: rgba(30, 41, 59, 0.45);
+    border: 1px solid #334155;
+    border-radius: 8px;
+  }
+  .perm-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: #cbd5e1;
+    cursor: pointer;
+  }
+  .perm-item input { accent-color: #2563eb; }
+  .footer {
+    margin-top: auto;
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #1e293b;
+  }
+  .btn {
+    padding: 8px 15px;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .btn-cancel { background: #1e293b; border-color: #334155; color: #cbd5e1; }
+  .btn-cancel:hover { background: #334155; }
+  .btn-submit { background: #2563eb; color: #ffffff; }
+  .btn-submit:hover { background: #1d4ed8; }
+</style>
+</head>
+<body>
+<form id="protectForm" class="wrap">
+  <div class="top">
+    <div class="badge-icon">&#128737;</div>
+    <div>
+      <div class="title">Proteger PDF con contraseña</div>
+      <div class="subtitle">Cifrado estándar PDF (RC4-128) compatible con Adobe Reader, Chrome y Edge.</div>
+    </div>
+  </div>
+  <div id="fileChip" class="file-chip"></div>
+  <div id="errBox" class="err"></div>
+  <div class="field-box">
+    <label class="field-label" for="openPwInput">Contraseña para abrir el PDF</label>
+    <div class="pw-row">
+      <input id="openPwInput" type="password" class="pw-input" placeholder="Escribe la contraseña..." autofocus />
+      <button type="button" id="togglePwBtn" class="toggle-btn">Ver</button>
+    </div>
+    <label class="field-label" for="confirmPwInput" style="margin-top:4px;">Confirmar contraseña</label>
+    <input id="confirmPwInput" type="password" class="pw-input" placeholder="Repite la contraseña..." />
+  </div>
+  <div class="perms">
+    <label class="perm-item"><input type="checkbox" id="allowPrint" checked /> Permitir imprimir el documento</label>
+    <label class="perm-item"><input type="checkbox" id="allowCopy" /> Permitir copiar texto e imágenes</label>
+    <label class="perm-item"><input type="checkbox" id="allowModify" /> Permitir editar o anotar páginas</label>
+  </div>
+  <div class="footer">
+    <button type="button" id="cancelBtn" class="btn btn-cancel">Cancelar</button>
+    <button type="submit" id="submitBtn" class="btn btn-submit">Proteger PDF</button>
+  </div>
+</form>
+<script>
+  var pwInput = document.getElementById('openPwInput');
+  var confirmInput = document.getElementById('confirmPwInput');
+  var errBox = document.getElementById('errBox');
+  document.getElementById('togglePwBtn').addEventListener('click', function() {
+    var show = pwInput.type === 'password';
+    pwInput.type = show ? 'text' : 'password';
+    confirmInput.type = show ? 'text' : 'password';
+    this.textContent = show ? 'Ocultar' : 'Ver';
+  });
+  document.getElementById('cancelBtn').addEventListener('click', function() {
+    window.speedPdfDesktop.cancelProtectPrompt();
+  });
+  document.getElementById('protectForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    var p1 = (pwInput.value || '').trim();
+    var p2 = (confirmInput.value || '').trim();
+    if (!p1) {
+      errBox.textContent = 'Ingresa una contraseña para proteger el documento.';
+      errBox.style.display = 'block';
+      pwInput.focus();
+      return;
+    }
+    if (p2 && p1 !== p2) {
+      errBox.textContent = 'Las contraseñas no coinciden. Verifica ambos campos.';
+      errBox.style.display = 'block';
+      confirmInput.focus();
+      return;
+    }
+    window.speedPdfDesktop.submitProtectPrompt({
+      cancelled: false,
+      openPassword: p1,
+      allowPrinting: document.getElementById('allowPrint').checked,
+      allowCopying: document.getElementById('allowCopy').checked,
+      allowModifying: document.getElementById('allowModify').checked,
+    });
+  });
+  window.speedPdfDesktop.getProtectPromptData().then(function(data) {
+    var files = (data && data.files) || [];
+    var chip = document.getElementById('fileChip');
+    if (files.length <= 1) {
+      chip.textContent = (files[0] && files[0].name) || 'Documento PDF';
+    } else {
+      chip.textContent = files.length + ' archivos PDF: ' + files.map(function(f){ return f.name; }).join(', ');
+      document.getElementById('submitBtn').textContent = 'Proteger ' + files.length + ' PDFs';
+    }
+    setTimeout(function() { pwInput.focus(); }, 30);
+  });
+</script>
+</body>
+</html>`;
+}
+
+ipcMain.handle('speedpdf:get-protect-prompt-data', () => {
+  return pendingProtectPromptData || { files: [] };
+});
+
+ipcMain.handle('speedpdf:submit-protect-prompt', (_event, result) => {
+  const resolver = pendingProtectPromptResolve;
+  pendingProtectPromptResolve = null;
+  pendingProtectPromptData = null;
+  if (protectPromptWindow && !protectPromptWindow.isDestroyed()) {
+    protectPromptWindow.close();
+  }
+  protectPromptWindow = null;
+  if (launchedHeadlessForCli && progressWindow && !progressWindow.isDestroyed()) {
+    progressWindow.show();
+  }
+  if (resolver) {
+    resolver(result || { cancelled: true });
+  }
+});
+
+ipcMain.handle('speedpdf:cancel-protect-prompt', () => {
+  const resolver = pendingProtectPromptResolve;
+  pendingProtectPromptResolve = null;
+  pendingProtectPromptData = null;
+  if (protectPromptWindow && !protectPromptWindow.isDestroyed()) {
+    protectPromptWindow.close();
+  }
+  protectPromptWindow = null;
+  if (resolver) {
+    resolver({ cancelled: true });
+  }
+});
+
+ipcMain.handle('speedpdf:prompt-protect-pdf', async (_event, params) => {
+  const files = Array.isArray(params?.files) ? params.files : [];
+
+  if (pendingProtectPromptResolve) {
+    pendingProtectPromptResolve({ cancelled: true });
+    pendingProtectPromptResolve = null;
+  }
+  if (protectPromptWindow && !protectPromptWindow.isDestroyed()) {
+    protectPromptWindow.destroy();
+    protectPromptWindow = null;
+  }
+
+  if (progressWindow && !progressWindow.isDestroyed()) {
+    progressWindow.hide();
+  }
+
+  pendingProtectPromptData = { files };
+
+  return new Promise((resolve) => {
+    pendingProtectPromptResolve = resolve;
+    protectPromptWindow = new BrowserWindow({
+      width: 500,
+      height: 475,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      show: false,
+      title: 'SPEED.PDF — Proteger PDF con contraseña',
+      autoHideMenuBar: true,
+      backgroundColor: '#0f172a',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+
+    protectPromptWindow.loadURL(
+      `data:text/html;charset=utf-8,${encodeURIComponent(buildProtectPromptWindowHtml())}`
+    );
+
+    protectPromptWindow.once('ready-to-show', () => {
+      if (protectPromptWindow && !protectPromptWindow.isDestroyed()) {
+        protectPromptWindow.center();
+        protectPromptWindow.show();
+        protectPromptWindow.focus();
+      }
+    });
+
+    protectPromptWindow.on('closed', () => {
+      protectPromptWindow = null;
+      if (pendingProtectPromptResolve) {
+        const res = pendingProtectPromptResolve;
+        pendingProtectPromptResolve = null;
+        pendingProtectPromptData = null;
         res({ cancelled: true });
       }
     });

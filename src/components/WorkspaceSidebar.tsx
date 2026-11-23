@@ -12,6 +12,7 @@ import {
   Moon,
   RefreshCw,
   RotateCw,
+  ShieldCheck,
   Sun,
   Unlock,
 } from 'lucide-react';
@@ -106,6 +107,12 @@ const TOOL_GROUPS: ToolNavGroup[] = [
   {
     groupLabel: 'Seguridad y cifrado',
     items: [
+      {
+        id: 'protect',
+        label: 'Proteger PDF',
+        subtitle: 'Contraseña y permisos',
+        icon: ShieldCheck,
+      },
       {
         id: 'unlock',
         label: 'Desproteger PDF',

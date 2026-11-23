@@ -44,5 +44,9 @@ contextBridge.exposeInMainWorld('speedPdfDesktop', {
   getUnlockPromptData: () => ipcRenderer.invoke('speedpdf:get-unlock-prompt-data'),
   submitUnlockPrompt: (result) => ipcRenderer.invoke('speedpdf:submit-unlock-prompt', result),
   cancelUnlockPrompt: () => ipcRenderer.invoke('speedpdf:cancel-unlock-prompt'),
+  promptProtectPdf: (params) => ipcRenderer.invoke('speedpdf:prompt-protect-pdf', params),
+  getProtectPromptData: () => ipcRenderer.invoke('speedpdf:get-protect-prompt-data'),
+  submitProtectPrompt: (result) => ipcRenderer.invoke('speedpdf:submit-protect-prompt', result),
+  cancelProtectPrompt: () => ipcRenderer.invoke('speedpdf:cancel-protect-prompt'),
   renderHtmlToPdf: (params) => ipcRenderer.invoke('speedpdf:html-to-pdf', params),
 });

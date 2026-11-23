@@ -37,6 +37,7 @@ import {
   mergePdfs,
   openPdfForOrganizerAndRenderThumbnails,
   pdfToImages,
+  protectPdf,
   rotatePdf,
   unlockPdf,
 } from './core/pdfEngine';
@@ -60,6 +61,7 @@ import {
   PdfToolId,
   ProcessedOutput,
   ProgressState,
+  ProtectPdfSettings,
   QueueFileItem,
   RotationAngle,
   UnlockPdfSettings,
@@ -132,6 +134,13 @@ const TOOL_METADATA: Record<
       'Transforma documentos .docx en archivos PDF portables con paginación automática y tipografía nítida.',
     acceptedHint: 'Documentos Word (.docx)',
     acceptAttr: '.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  },
+  protect: {
+    title: 'Proteger archivos PDF con contraseña',
+    description:
+      'Cifra tus PDFs con estándar RC4-128 y define contraseña de apertura más permisos de impresión, copia y edición.',
+    acceptedHint: 'Archivos PDF (.pdf)',
+    acceptAttr: '.pdf,application/pdf',
   },
   unlock: {
     title: 'Desproteger archivos PDF',
@@ -213,6 +222,15 @@ export default function App() {
     fontSize: 11,
     pageSize: 'a4',
     fidelityMode: 'editable',
+  });
+
+  const [protectSettings, setProtectSettings] = useState<ProtectPdfSettings>({
+    openPassword: '',
+    ownerPassword: '',
+    allowPrinting: true,
+    allowCopying: false,
+    allowModifying: false,
+    stripMetadata: false,
   });
 
   const [unlockSettings, setUnlockSettings] = useState<UnlockPdfSettings>({
@@ -367,7 +385,7 @@ export default function App() {
     setActiveSection(section);
     if (
       section === 'workspace' &&
-      !['compress', 'merge', 'organize', 'rotate', 'unlock', 'vault'].includes(activeTool)
+      !['compress', 'merge', 'organize', 'rotate', 'protect', 'unlock', 'vault'].includes(activeTool)
     ) {
       setActiveTool('compress');
     } else if (
@@ -385,7 +403,7 @@ export default function App() {
     setErrorMessage(null);
     setContextBanner(null);
     setOutputs([]);
-    if (['compress', 'merge', 'organize', 'rotate', 'unlock', 'vault'].includes(tool)) {
+    if (['compress', 'merge', 'organize', 'rotate', 'protect', 'unlock', 'vault'].includes(tool)) {
       setActiveSection('workspace');
     } else {
       setActiveSection('converter');
@@ -911,6 +929,27 @@ export default function App() {
           );
           createdOutputs.push(out);
         }
+      } else if (toolToRun === 'protect') {
+        const pdfItems = itemsToProcess.filter((i) => i.kind === 'pdf');
+        if (pdfItems.length === 0) {
+          throw new Error('Carga al menos un archivo PDF para proteger.');
+        }
+        for (const item of pdfItems) {
+          const res = await protectPdf(
+            item.file,
+            protectSettings,
+            reportProgress,
+            item.rotation ?? 0
+          );
+          const out = await maybeEncrypt(
+            res.blob,
+            res.fileName,
+            item.size,
+            `Protegido con contraseña RC4-128 (${res.pageCount} pág.)`,
+            res.pageCount
+          );
+          createdOutputs.push(out);
+        }
       } else if (toolToRun === 'unlock') {
         const pdfItems = itemsToProcess.filter((i) => i.kind === 'pdf');
         if (pdfItems.length === 0) {
@@ -1175,6 +1214,9 @@ export default function App() {
       } else if (normalizedMode === 'rotate') {
         targetTool = 'rotate';
         autoRun = !payload.customUi;
+      } else if (normalizedMode === 'protect') {
+        targetTool = 'protect';
+        autoRun = payload.autoConvert && !payload.customUi;
       } else if (normalizedMode === 'unlock') {
         targetTool = 'unlock';
         autoRun = payload.autoConvert && !payload.customUi;
@@ -1267,6 +1309,119 @@ export default function App() {
           status: 'active',
         });
       };
+
+      // Flujo headless con ventana emergente para Proteger PDF
+      if (targetTool === 'protect') {
+        const pdfItems = items.filter((i) => i.kind === 'pdf');
+        if (pdfItems.length === 0) {
+          await bridge.completeBackgroundTask({
+            ok: false,
+            title: 'SPEED.PDF — Sin archivos PDF',
+            body: 'Selecciona al menos un archivo PDF para proteger.',
+          });
+          return;
+        }
+
+        if (!bridge.promptProtectPdf) {
+          await bridge.showMainWindow();
+          setContextBanner(`Archivo(s) cargados para proteger (${payload.sourceDir}).`);
+          return;
+        }
+
+        const protectChoice = await bridge.promptProtectPdf({
+          files: pdfItems.map((it) => ({
+            key: it.id,
+            name: it.name,
+            path: it.sourcePath,
+          })),
+        });
+
+        if (protectChoice.cancelled || !protectChoice.openPassword?.trim()) {
+          await bridge.cancelBackgroundTask();
+          return;
+        }
+
+        const effectiveSettings: ProtectPdfSettings = {
+          openPassword: protectChoice.openPassword.trim(),
+          ownerPassword: '',
+          allowPrinting: protectChoice.allowPrinting ?? true,
+          allowCopying: protectChoice.allowCopying ?? false,
+          allowModifying: protectChoice.allowModifying ?? false,
+          stripMetadata: false,
+        };
+
+        sendBgProgress({
+          active: true,
+          percent: 12,
+          stage: `Protegiendo ${pdfItems.length} PDF(s) con contraseña...`,
+        });
+
+        const completedOutputs: ProcessedOutput[] = [];
+        const usedOutputNamesLower = new Set<string>();
+        const started = performance.now();
+
+        try {
+          for (const item of pdfItems) {
+            const res = await protectPdf(
+              item.file,
+              effectiveSettings,
+              sendBgProgress,
+              item.rotation ?? 0
+            );
+            const finalName = resolveUniqueFileName(res.fileName, usedOutputNamesLower);
+            completedOutputs.push({
+              id: crypto.randomUUID(),
+              tool: 'protect',
+              fileName: finalName,
+              mimeType: res.blob.type,
+              blob: res.blob,
+              originalSize: item.size,
+              outputSize: res.blob.size,
+              durationMs: Math.round(performance.now() - started),
+              pageCount: res.pageCount,
+              encrypted: false,
+              summary: `Protegido con contraseña RC4-128 (${res.pageCount} pág.)`,
+              createdAt: Date.now(),
+            });
+          }
+        } catch (err) {
+          await bridge.completeBackgroundTask({
+            ok: false,
+            title: 'SPEED.PDF — No se pudo proteger',
+            body: err instanceof Error ? err.message : 'Error protegiendo el documento PDF.',
+          });
+          return;
+        }
+
+        if (completedOutputs.length > 0) {
+          sendBgProgress({
+            active: true,
+            percent: 97,
+            stage: `Guardando ${completedOutputs.length} archivo(s) protegido(s)...`,
+          });
+          const savedNames: string[] = [];
+          const updatedOutputs: ProcessedOutput[] = [];
+          for (const out of completedOutputs) {
+            const bytes = new Uint8Array(await out.blob.arrayBuffer());
+            const writeResult = await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+            const actualName =
+              typeof writeResult === 'string'
+                ? writeResult.split(/[/\\]/).pop() || out.fileName
+                : writeResult.fileName;
+            savedNames.push(actualName);
+            updatedOutputs.push({ ...out, fileName: actualName });
+          }
+          setOutputs(updatedOutputs);
+          const summary = `Guardado en ${payload.sourceDir}: ${savedNames.join(', ')}`;
+          setContextBanner(summary);
+          await bridge.completeBackgroundTask({
+            ok: true,
+            title: 'SPEED.PDF — PDF protegido',
+            body: summary,
+          });
+        }
+        return;
+      }
 
       // Flujo headless inteligente para Desproteger PDF con ventana emergente de contraseñas
       if (targetTool === 'unlock') {
@@ -1690,6 +1845,8 @@ export default function App() {
                 onChangeImageToPdf={setImageToPdf}
                 wordSettings={wordSettings}
                 onChangeWordSettings={setWordSettings}
+                protectSettings={protectSettings}
+                onChangeProtectSettings={setProtectSettings}
                 unlockSettings={unlockSettings}
                 onChangeUnlockSettings={setUnlockSettings}
                 vaultMode={vaultMode}
@@ -1750,7 +1907,7 @@ export default function App() {
 
             <ul className="text-xs text-slate-600 dark:text-slate-300 space-y-1.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
               <li>
-                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Ordenar páginas, Convertir a Word, JPG o Desproteger PDF
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Ordenar páginas, Convertir a Word, JPG, Proteger PDF o Desproteger PDF
               </li>
               <li>
                 <strong className="font-mono text-slate-800 dark:text-slate-100">.docx</strong> → Convertir a PDF, Unir en 1 PDF o PDFs separados

@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Lock, Play, RotateCw, Unlock } from 'lucide-react';
+import { Eye, EyeOff, Lock, Play, RotateCw, ShieldCheck, Unlock } from 'lucide-react';
 import { useState } from 'react';
 import {
   BatchConvertMode,
@@ -7,6 +7,7 @@ import {
   ImageExportSettings,
   ImageToPdfSettings,
   PdfToolId,
+  ProtectPdfSettings,
   UnlockPdfSettings,
   WordConversionSettings,
 } from '../types/speedpdf';
@@ -38,6 +39,8 @@ interface ToolSettingsPanelProps {
   onChangeImageToPdf: (next: ImageToPdfSettings) => void;
   wordSettings: WordConversionSettings;
   onChangeWordSettings: (next: WordConversionSettings) => void;
+  protectSettings: ProtectPdfSettings;
+  onChangeProtectSettings: (next: ProtectPdfSettings) => void;
   unlockSettings: UnlockPdfSettings;
   onChangeUnlockSettings: (next: UnlockPdfSettings) => void;
   vaultMode: 'encrypt' | 'decrypt';
@@ -122,6 +125,8 @@ export function ToolSettingsPanel({
   onChangeImageToPdf,
   wordSettings,
   onChangeWordSettings,
+  protectSettings,
+  onChangeProtectSettings,
   unlockSettings,
   onChangeUnlockSettings,
   vaultMode,
@@ -137,6 +142,8 @@ export function ToolSettingsPanel({
   onExecute,
 }: ToolSettingsPanelProps) {
   const [showUnlockPassword, setShowUnlockPassword] = useState(false);
+  const [showProtectPassword, setShowProtectPassword] = useState(false);
+  const [confirmOpenPassword, setConfirmOpenPassword] = useState('');
 
   const applyPreset = (preset: (typeof COMPRESSION_PRESETS)[number]) => {
     onChangeCompression({
@@ -172,6 +179,8 @@ export function ToolSettingsPanel({
         return 'Convertir PDF a Word (.docx)';
       case 'word-to-pdf':
         return 'Convertir Word a PDF';
+      case 'protect':
+        return fileCount > 1 ? `Proteger ${fileCount} PDFs` : 'Proteger PDF';
       case 'unlock':
         return fileCount > 1 ? `Desproteger ${fileCount} PDFs` : 'Desproteger PDF';
       case 'vault':
@@ -179,10 +188,22 @@ export function ToolSettingsPanel({
     }
   })();
 
+  const protectOpenMismatch =
+    activeTool === 'protect' &&
+    protectSettings.openPassword.trim().length > 0 &&
+    confirmOpenPassword.length > 0 &&
+    protectSettings.openPassword !== confirmOpenPassword;
+
+  const protectMissingPassword =
+    activeTool === 'protect' &&
+    protectSettings.openPassword.trim().length === 0 &&
+    protectSettings.ownerPassword.trim().length === 0;
+
   const isDisabled =
     isProcessing ||
     (activeTool === 'organize' ? organizerPageCount === 0 : !hasFiles) ||
     (activeTool === 'merge' && fileCount < 2) ||
+    (activeTool === 'protect' && (protectMissingPassword || protectOpenMismatch)) ||
     ((activeTool === 'vault' || encryptOutput) && vaultPassword.trim().length < 4);
 
   return (
@@ -601,9 +622,9 @@ export function ToolSettingsPanel({
                     : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-300'
                 }`}
               >
-                <div className="text-sm font-medium">Texto editable (estilos y columnas)</div>
+                <div className="text-sm font-medium">Texto editable (columnas, tablas y estilos)</div>
                 <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                  Extrae párrafos editables con negritas/cursivas, encabezados y captura nítida para escaneos
+                  Reconstruye orden de lectura por columnas, tablas reales, márgenes, colores e imágenes embebidas
                 </div>
               </button>
 
@@ -735,6 +756,134 @@ export function ToolSettingsPanel({
               />
             </label>
           )}
+        </div>
+      )}
+
+      {activeTool === 'protect' && (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-blue-200/80 dark:border-blue-900/60 bg-blue-50/60 dark:bg-blue-950/30 px-3.5 py-2.5 flex items-start gap-2.5 text-xs text-slate-700 dark:text-slate-300">
+            <ShieldCheck className="w-4 h-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+            <span>
+              Aplica cifrado estándar PDF (RC4-128) directamente sobre el archivo .pdf. Cualquier visor (Adobe Acrobat, Chrome, Edge) pedirá la contraseña al abrir o aplicará las restricciones configuradas.
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Contraseña para abrir el PDF
+              </span>
+              <div className="relative">
+                <input
+                  type={showProtectPassword ? 'text' : 'password'}
+                  value={protectSettings.openPassword}
+                  onChange={(e) =>
+                    onChangeProtectSettings({ ...protectSettings, openPassword: e.target.value })
+                  }
+                  placeholder="Ingresa la contraseña..."
+                  autoComplete="new-password"
+                  className="w-full pl-3 pr-9 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowProtectPassword((prev) => !prev)}
+                  aria-label={showProtectPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded text-slate-400 hover:text-slate-700 dark:hover:text-slate-200"
+                >
+                  {showProtectPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Confirmar contraseña de apertura
+              </span>
+              <input
+                type={showProtectPassword ? 'text' : 'password'}
+                value={confirmOpenPassword}
+                onChange={(e) => setConfirmOpenPassword(e.target.value)}
+                placeholder="Repite la contraseña (opcional)"
+                autoComplete="new-password"
+                className={`w-full px-3 py-2 text-sm rounded-lg border bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 ${
+                  protectOpenMismatch
+                    ? 'border-red-500 focus:ring-red-500'
+                    : 'border-slate-300 dark:border-slate-700 focus:ring-blue-600'
+                }`}
+              />
+              {protectOpenMismatch && (
+                <span className="block text-[11px] text-red-600 dark:text-red-400">
+                  Las contraseñas no coinciden.
+                </span>
+              )}
+            </label>
+
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Clave de permisos (opcional)
+              </span>
+              <input
+                type={showProtectPassword ? 'text' : 'password'}
+                value={protectSettings.ownerPassword}
+                onChange={(e) =>
+                  onChangeProtectSettings({ ...protectSettings, ownerPassword: e.target.value })
+                }
+                placeholder="Vacío = usar la misma clave"
+                autoComplete="new-password"
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+            </label>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-1 text-xs text-slate-700 dark:text-slate-300">
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={protectSettings.allowPrinting}
+                onChange={(e) =>
+                  onChangeProtectSettings({ ...protectSettings, allowPrinting: e.target.checked })
+                }
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Permitir imprimir</span>
+            </label>
+
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={protectSettings.allowCopying}
+                onChange={(e) =>
+                  onChangeProtectSettings({ ...protectSettings, allowCopying: e.target.checked })
+                }
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Permitir copiar texto e imágenes</span>
+            </label>
+
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={protectSettings.allowModifying}
+                onChange={(e) =>
+                  onChangeProtectSettings({ ...protectSettings, allowModifying: e.target.checked })
+                }
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Permitir editar o anotar</span>
+            </label>
+
+            <label className="inline-flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={protectSettings.stripMetadata}
+                onChange={(e) =>
+                  onChangeProtectSettings({ ...protectSettings, stripMetadata: e.target.checked })
+                }
+                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+              />
+              <span>Limpiar metadatos privados</span>
+            </label>
+          </div>
         </div>
       )}
 

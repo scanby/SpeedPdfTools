@@ -5,6 +5,7 @@ export type PdfToolId =
   | 'merge'
   | 'organize'
   | 'rotate'
+  | 'protect'
   | 'unlock'
   | 'batch-to-pdf'
   | 'pdf-to-img'
@@ -65,6 +66,15 @@ export interface CompressionSettings {
   jpegQuality: number;
   stripMetadata: boolean;
   structuralOnly: boolean;
+}
+
+export interface ProtectPdfSettings {
+  openPassword: string;
+  ownerPassword: string;
+  allowPrinting: boolean;
+  allowCopying: boolean;
+  allowModifying: boolean;
+  stripMetadata: boolean;
 }
 
 export interface UnlockPdfSettings {

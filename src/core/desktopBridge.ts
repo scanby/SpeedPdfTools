@@ -45,6 +45,14 @@ export interface UnlockPromptResult {
   passwordsByKey?: Record<string, string>;
 }
 
+export interface ProtectPromptResult {
+  cancelled: boolean;
+  openPassword?: string;
+  allowPrinting?: boolean;
+  allowCopying?: boolean;
+  allowModifying?: boolean;
+}
+
 export interface BackgroundProgressPayload {
   percent: number;
   stage: string;
@@ -85,6 +93,9 @@ export interface SpeedPdfDesktopApi {
     files: UnlockPromptFileEntry[];
     errorMessage?: string;
   }) => Promise<UnlockPromptResult>;
+  promptProtectPdf: (params: {
+    files: UnlockPromptFileEntry[];
+  }) => Promise<ProtectPromptResult>;
   renderHtmlToPdf: (params: {
     html: string;
     pageSize: 'a4' | 'letter';
