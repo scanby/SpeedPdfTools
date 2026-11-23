@@ -35,6 +35,7 @@ export interface QueueFileItem {
   rotation?: RotationAngle;
   thumbnailUrl?: string;
   requiresPassword?: boolean;
+  sourcePath?: string;
   addedAt: number;
 }
 
@@ -55,6 +56,7 @@ export interface OrganizerPageItem {
   originalPageNumber: number;
   rotation: RotationAngle;
   thumbnailUrl?: string;
+  thumbnailStatus?: 'loading' | 'ready' | 'failed';
 }
 
 export interface CompressionSettings {
@@ -90,6 +92,7 @@ export interface WordConversionSettings {
   preservePageBreaks: boolean;
   fontSize: number;
   pageSize: 'a4' | 'letter';
+  fidelityMode: 'editable' | 'visual';
 }
 
 export interface ProcessedOutput {

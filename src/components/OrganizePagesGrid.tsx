@@ -245,6 +245,11 @@ export function OrganizePagesGrid({
   };
 
   const totalBytes = sourceFiles.reduce((acc, sf) => acc + sf.size, 0);
+  const completedThumbs = useMemo(
+    () =>
+      pages.filter((p) => Boolean(p.thumbnailUrl) || p.thumbnailStatus === 'failed').length,
+    [pages]
+  );
 
   return (
     <section className="space-y-4">
@@ -322,9 +327,9 @@ export function OrganizePagesGrid({
               {isLoadingThumbnails && (
                 <>
                   <span aria-hidden="true">·</span>
-                  <span className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 font-medium">
+                  <span className="inline-flex items-center gap-1.5 text-blue-600 dark:text-blue-400 font-medium tabular-nums">
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    Generando miniaturas...
+                    Generando miniaturas ({completedThumbs}/{pages.length})...
                   </span>
                 </>
               )}
@@ -500,6 +505,15 @@ export function OrganizePagesGrid({
                             isSideways ? 'max-w-[116px] max-h-[116px]' : 'max-w-full max-h-full'
                           }`}
                         />
+                      ) : page.thumbnailStatus === 'failed' ? (
+                        <div className="w-24 h-28 rounded border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900 flex flex-col items-center justify-center text-center px-2 gap-1">
+                          <span className="text-[10px] font-medium text-slate-500 dark:text-slate-400">
+                            Vista no disponible
+                          </span>
+                          <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                            Pág. {page.originalPageNumber}
+                          </span>
+                        </div>
                       ) : (
                         <div className="w-20 h-28 rounded border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 animate-pulse flex items-center justify-center">
                           <span className="text-[11px] font-mono text-slate-400 tabular-nums">

@@ -5,6 +5,7 @@ import { OrganizePagesGrid } from './components/OrganizePagesGrid';
 import { OutputPanel } from './components/OutputPanel';
 import { ToolSettingsPanel } from './components/ToolSettingsPanel';
 import { TopBar } from './components/TopBar';
+import { UnlockPasswordsModal } from './components/UnlockPasswordsModal';
 import { UpdateCheckerPanel } from './components/UpdateCheckerPanel';
 import { WorkspaceSidebar } from './components/WorkspaceSidebar';
 import {
@@ -17,6 +18,7 @@ import {
   DesktopShellStatus,
   desktopResultToFile,
   getDesktopBridge,
+  getDesktopFilePath,
 } from './core/desktopBridge';
 import { docxToPdf, pdfToDocx } from './core/docxBridge';
 import {
@@ -28,13 +30,13 @@ import {
 import {
   assembleOrganizedPdf,
   compressPdf,
-  getPdfPageCount,
   imagesToPdf,
   inspectImageFile,
   inspectPdfFile,
+  inspectPdfProtection,
   mergePdfs,
+  openPdfForOrganizerAndRenderThumbnails,
   pdfToImages,
-  renderPdfAllPageThumbnails,
   rotatePdf,
   unlockPdf,
 } from './core/pdfEngine';
@@ -194,8 +196,8 @@ export default function App() {
 
   const [imageExport, setImageExport] = useState<ImageExportSettings>({
     format: 'jpeg',
-    dpi: 150,
-    quality: 0.88,
+    dpi: 220,
+    quality: 0.94,
     bundleAsZip: true,
   });
 
@@ -203,13 +205,14 @@ export default function App() {
     pageSize: 'a4',
     orientation: 'auto',
     marginPt: 18,
-    jpegQuality: 0.9,
+    jpegQuality: 0.95,
   });
 
   const [wordSettings, setWordSettings] = useState<WordConversionSettings>({
     preservePageBreaks: true,
     fontSize: 11,
     pageSize: 'a4',
+    fidelityMode: 'editable',
   });
 
   const [unlockSettings, setUnlockSettings] = useState<UnlockPdfSettings>({
@@ -224,6 +227,13 @@ export default function App() {
   const [batchOutputName, setBatchOutputName] = useState('lote_convertido_unificado');
   const [encryptOutput, setEncryptOutput] = useState(false);
   const [vaultPassword, setVaultPassword] = useState('');
+  const [unlockPromptState, setUnlockPromptState] = useState<{
+    items: QueueFileItem[];
+    filesToPrompt: { id: string; name: string }[];
+    resolvedPasswordsById: Record<string, string>;
+    priorOutputs: ProcessedOutput[];
+    errorMessage?: string | null;
+  } | null>(null);
   const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
   const [isShellModalOpen, setIsShellModalOpen] = useState(false);
   const [shellStatus, setShellStatus] = useState<DesktopShellStatus | null>(null);
@@ -285,66 +295,70 @@ export default function App() {
 
     for (const file of pdfFiles) {
       if (sessionId !== organizerSessionRef.current) return;
+      const sourceFileId = crypto.randomUUID();
+      setOrganizerLoadingCount((c) => c + 1);
       try {
-        const pageCount = await getPdfPageCount(file);
-        if (sessionId !== organizerSessionRef.current) return;
-        if (pageCount <= 0) continue;
-
-        const sourceFileId = crypto.randomUUID();
-        const colorIndex = organizerColorCounterRef.current++;
-
-        const newSourceFile: OrganizerSourceFile = {
-          id: sourceFileId,
+        await openPdfForOrganizerAndRenderThumbnails(
           file,
-          name: file.name,
-          size: file.size,
-          pageCount,
-          colorIndex,
-        };
+          (pageCount) => {
+            if (sessionId !== organizerSessionRef.current || pageCount <= 0) return;
+            const colorIndex = organizerColorCounterRef.current++;
 
-        const newPages: OrganizerPageItem[] = Array.from({ length: pageCount }, (_, i) => ({
-          id: crypto.randomUUID(),
-          sourceFileId,
-          sourceFileName: file.name,
-          colorIndex,
-          originalPageNumber: i + 1,
-          rotation: 0,
-        }));
+            const newSourceFile: OrganizerSourceFile = {
+              id: sourceFileId,
+              file,
+              name: file.name,
+              size: file.size,
+              pageCount,
+              colorIndex,
+            };
 
-        setOrganizerFiles((prev) => [...prev, newSourceFile]);
-        setOrganizerPages((prev) => [...prev, ...newPages]);
+            const newPages: OrganizerPageItem[] = Array.from({ length: pageCount }, (_, i) => ({
+              id: crypto.randomUUID(),
+              sourceFileId,
+              sourceFileName: file.name,
+              colorIndex,
+              originalPageNumber: i + 1,
+              rotation: 0,
+              thumbnailStatus: 'loading',
+            }));
 
-        setOrganizerLoadingCount((c) => c + 1);
-        void renderPdfAllPageThumbnails(
-          file,
-          (pageNum, thumbnailUrl) => {
+            setOrganizerFiles((prev) => [...prev, newSourceFile]);
+            setOrganizerPages((prev) => [...prev, ...newPages]);
+          },
+          (thumbnailsByPage, failedPages) => {
             if (sessionId !== organizerSessionRef.current) return;
             const cache = organizerThumbCacheRef.current.get(sourceFileId) ?? {};
-            cache[pageNum] = thumbnailUrl;
+            Object.entries(thumbnailsByPage).forEach(([k, url]) => {
+              cache[Number(k)] = url;
+            });
             organizerThumbCacheRef.current.set(sourceFileId, cache);
 
+            const failedSet = new Set(failedPages);
             setOrganizerPages((prev) =>
-              prev.map((p) =>
-                p.sourceFileId === sourceFileId && p.originalPageNumber === pageNum
-                  ? { ...p, thumbnailUrl }
-                  : p
-              )
+              prev.map((p) => {
+                if (p.sourceFileId !== sourceFileId) return p;
+                const url = thumbnailsByPage[p.originalPageNumber];
+                if (url) {
+                  return { ...p, thumbnailUrl: url, thumbnailStatus: 'ready' };
+                }
+                if (failedSet.has(p.originalPageNumber)) {
+                  return { ...p, thumbnailStatus: 'failed' };
+                }
+                return p;
+              })
             );
           },
           () => sessionId !== organizerSessionRef.current
-        )
-          .catch(() => {
-            // Keep page cards functional even if a thumbnail fails to render
-          })
-          .finally(() => {
-            setOrganizerLoadingCount((c) => Math.max(0, c - 1));
-          });
+        );
       } catch (err) {
         setErrorMessage(
           err instanceof Error
             ? `No se pudo abrir ${file.name}: ${err.message}`
             : `No se pudo leer el archivo PDF ${file.name}.`
         );
+      } finally {
+        setOrganizerLoadingCount((c) => Math.max(0, c - 1));
       }
     }
   };
@@ -402,6 +416,7 @@ export default function App() {
       pageRange: 'Todas',
       rotation: 0,
       addedAt: Date.now(),
+      sourcePath: getDesktopFilePath(file),
     }));
 
     setQueue((prev) => (replace ? newItems : [...prev, ...newItems]));
@@ -643,7 +658,8 @@ export default function App() {
     imageFormatOverride?: ImageExportSettings['format'],
     onProgressUpdate?: (state: ProgressState) => void,
     onToolError?: (message: string) => void,
-    outputNameOverride?: string
+    outputNameOverride?: string,
+    unlockPasswordsById?: Record<string, string>
   ): Promise<ProcessedOutput[]> => {
     if (toolToRun !== 'organize' && itemsToProcess.length === 0) return [];
     setErrorMessage(null);
@@ -901,11 +917,13 @@ export default function App() {
           throw new Error('Carga al menos un archivo PDF para desproteger.');
         }
         for (const item of pdfItems) {
+          const passwordForFile = unlockPasswordsById?.[item.id];
           const res = await unlockPdf(
             item.file,
             unlockSettings,
             reportProgress,
-            item.rotation ?? 0
+            item.rotation ?? 0,
+            passwordForFile
           );
           const out = await maybeEncrypt(
             res.blob,
@@ -975,6 +993,137 @@ export default function App() {
       onToolError?.(msg);
       return [];
     }
+  };
+
+  const runInAppUnlock = async (
+    pdfItems: QueueFileItem[],
+    passwordsById: Record<string, string>,
+    priorOutputs: ProcessedOutput[] = []
+  ) => {
+    setErrorMessage(null);
+    const failedItems: { id: string; name: string }[] = [];
+    let firstPasswordErr: string | null = null;
+    const accumulatedOutputs: ProcessedOutput[] = [...priorOutputs];
+    const started = performance.now();
+    const usedOutputNamesLower = new Set<string>(
+      priorOutputs.map((o) => o.fileName.toLowerCase())
+    );
+
+    for (const item of pdfItems) {
+      try {
+        const passwordOverride = passwordsById[item.id] ?? unlockSettings.password;
+        const res = await unlockPdf(
+          item.file,
+          unlockSettings,
+          setProgress,
+          item.rotation ?? 0,
+          passwordOverride
+        );
+        const shouldEncrypt = encryptOutput;
+        const finalBlob = shouldEncrypt
+          ? await encryptBlobLocal(res.blob, vaultPassword, res.fileName)
+          : res.blob;
+        const desiredName = shouldEncrypt ? `${res.fileName}.speedvault` : res.fileName;
+        const finalName = resolveUniqueFileName(desiredName, usedOutputNamesLower);
+        accumulatedOutputs.push({
+          id: crypto.randomUUID(),
+          tool: 'unlock',
+          fileName: finalName,
+          mimeType: shouldEncrypt ? 'application/octet-stream' : res.blob.type,
+          blob: finalBlob,
+          originalSize: item.size,
+          outputSize: finalBlob.size,
+          durationMs: Math.round(performance.now() - started),
+          pageCount: res.pageCount,
+          encrypted: shouldEncrypt,
+          summary: `${
+            res.wasProtected
+              ? `Restricciones eliminadas (${res.pageCount} pág.)`
+              : `Copia limpia sin restricciones (${res.pageCount} pág.)`
+          }${shouldEncrypt ? ' · Cifrado AES-256' : ''}`,
+          createdAt: Date.now(),
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Error al desproteger.';
+        if (/contraseñ|password|clave/i.test(msg)) {
+          failedItems.push({ id: item.id, name: item.name });
+          if (!firstPasswordErr) firstPasswordErr = msg;
+        } else {
+          setProgress({ active: false, percent: 0, stage: '' });
+          setErrorMessage(msg);
+          return;
+        }
+      }
+    }
+
+    if (accumulatedOutputs.length > 0) {
+      setOutputs(accumulatedOutputs);
+    }
+
+    if (failedItems.length > 0) {
+      setProgress({ active: false, percent: 0, stage: '' });
+      const remainingQueueItems = pdfItems.filter((it) =>
+        failedItems.some((f) => f.id === it.id)
+      );
+      setUnlockPromptState({
+        items: remainingQueueItems,
+        filesToPrompt: failedItems,
+        resolvedPasswordsById: passwordsById,
+        priorOutputs: accumulatedOutputs,
+        errorMessage: firstPasswordErr,
+      });
+    }
+  };
+
+  const handleExecuteActiveTool = async () => {
+    if (activeTool !== 'unlock') {
+      await executeToolWithItems(activeTool, queue);
+      return;
+    }
+
+    const pdfItems = queue.filter((i) => i.kind === 'pdf');
+    if (pdfItems.length === 0) {
+      setErrorMessage('Carga al menos un archivo PDF para desproteger.');
+      return;
+    }
+
+    if (unlockSettings.password.trim()) {
+      const map: Record<string, string> = {};
+      pdfItems.forEach((it) => {
+        map[it.id] = unlockSettings.password.trim();
+      });
+      await runInAppUnlock(pdfItems, map);
+      return;
+    }
+
+    const lockedEntries: { id: string; name: string }[] = [];
+    for (const item of pdfItems) {
+      if (item.requiresPassword) {
+        lockedEntries.push({ id: item.id, name: item.name });
+      } else if (item.requiresPassword === undefined) {
+        try {
+          const check = await inspectPdfProtection(item.file);
+          if (check.requiresOpenPassword) {
+            lockedEntries.push({ id: item.id, name: item.name });
+          }
+        } catch {
+          // Handled during unlockPdf
+        }
+      }
+    }
+
+    if (lockedEntries.length > 0) {
+      setUnlockPromptState({
+        items: pdfItems,
+        filesToPrompt: lockedEntries,
+        resolvedPasswordsById: {},
+        priorOutputs: [],
+        errorMessage: null,
+      });
+      return;
+    }
+
+    await runInAppUnlock(pdfItems, {});
   };
 
   const desktopHandlerRef = useRef<(payload: DesktopLaunchPayload) => Promise<void>>(async () => {});
@@ -1082,6 +1231,19 @@ export default function App() {
       }
 
       handleSelectTool(targetTool);
+
+      if (targetTool === 'organize') {
+        await bridge.showMainWindow();
+        setContextBanner(
+          `Cargando ${files.length} PDF(s) en Ordenar páginas (${payload.sourceDir})...`
+        );
+        await addPdfFilesToOrganizer(files, true);
+        setContextBanner(
+          `PDF(s) cargados en Ordenar páginas desde el Explorador de Windows (${payload.sourceDir}).`
+        );
+        return;
+      }
+
       const items = await addFilesToQueue(files, true, autoRun);
 
       if (!autoRun) {
@@ -1105,6 +1267,181 @@ export default function App() {
           status: 'active',
         });
       };
+
+      // Flujo headless inteligente para Desproteger PDF con ventana emergente de contraseñas
+      if (targetTool === 'unlock') {
+        const pdfItems = items.filter((i) => i.kind === 'pdf');
+        if (pdfItems.length === 0) {
+          await bridge.completeBackgroundTask({
+            ok: false,
+            title: 'SPEED.PDF — Sin archivos PDF',
+            body: 'Selecciona al menos un archivo PDF para desproteger.',
+          });
+          return;
+        }
+
+        const passwordsById: Record<string, string> = {};
+        const lockedEntries: { key: string; name: string; path?: string }[] = [];
+
+        for (const item of pdfItems) {
+          const check = await inspectPdfProtection(item.file).catch(() => ({
+            requiresOpenPassword: false,
+            pageCount: 0,
+          }));
+          if (check.requiresOpenPassword) {
+            lockedEntries.push({
+              key: item.id,
+              name: item.name,
+              path: item.sourcePath,
+            });
+          }
+        }
+
+        if (lockedEntries.length > 0 && bridge.promptUnlockPasswords) {
+          const promptRes = await bridge.promptUnlockPasswords({
+            files: lockedEntries,
+          });
+          if (promptRes.cancelled) {
+            await bridge.cancelBackgroundTask();
+            return;
+          }
+          if (promptRes.mode === 'shared') {
+            lockedEntries.forEach((e) => {
+              passwordsById[e.key] = promptRes.sharedPassword ?? '';
+            });
+          } else {
+            lockedEntries.forEach((e) => {
+              passwordsById[e.key] = promptRes.passwordsByKey?.[e.key] ?? '';
+            });
+          }
+        }
+
+        sendBgProgress({
+          active: true,
+          percent: 12,
+          stage: `Desprotegiendo ${pdfItems.length} PDF(s)...`,
+        });
+
+        const completedOutputs: ProcessedOutput[] = [];
+        const usedOutputNamesLower = new Set<string>();
+        let pendingItems = [...pdfItems];
+
+        while (pendingItems.length > 0) {
+          const failedItems: QueueFileItem[] = [];
+          let firstPwError: string | null = null;
+
+          for (const item of pendingItems) {
+            try {
+              const started = performance.now();
+              const res = await unlockPdf(
+                item.file,
+                unlockSettings,
+                sendBgProgress,
+                item.rotation ?? 0,
+                passwordsById[item.id]
+              );
+              const finalName = resolveUniqueFileName(res.fileName, usedOutputNamesLower);
+              completedOutputs.push({
+                id: crypto.randomUUID(),
+                tool: 'unlock',
+                fileName: finalName,
+                mimeType: res.blob.type,
+                blob: res.blob,
+                originalSize: item.size,
+                outputSize: res.blob.size,
+                durationMs: Math.round(performance.now() - started),
+                pageCount: res.pageCount,
+                encrypted: false,
+                summary: res.wasProtected
+                  ? `Restricciones eliminadas (${res.pageCount} pág.)`
+                  : `Copia limpia sin restricciones (${res.pageCount} pág.)`,
+                createdAt: Date.now(),
+              });
+            } catch (err) {
+              const msg = err instanceof Error ? err.message : 'Error al desproteger PDF.';
+              if (/contraseñ|password|clave/i.test(msg)) {
+                failedItems.push(item);
+                if (!firstPwError) firstPwError = msg;
+              } else {
+                await bridge.completeBackgroundTask({
+                  ok: false,
+                  title: 'SPEED.PDF — No se pudo completar',
+                  body: msg,
+                });
+                return;
+              }
+            }
+          }
+
+          if (failedItems.length === 0) break;
+
+          if (!bridge.promptUnlockPasswords) {
+            await bridge.completeBackgroundTask({
+              ok: false,
+              title: 'SPEED.PDF — Contraseña requerida',
+              body: firstPwError || 'Contraseña incorrecta.',
+            });
+            return;
+          }
+
+          const retryRes = await bridge.promptUnlockPasswords({
+            files: failedItems.map((fi) => ({
+              key: fi.id,
+              name: fi.name,
+              path: fi.sourcePath,
+            })),
+            errorMessage: firstPwError || 'Contraseña incorrecta. Verifica e intenta nuevamente.',
+          });
+
+          if (retryRes.cancelled) {
+            if (completedOutputs.length === 0) {
+              await bridge.cancelBackgroundTask();
+              return;
+            }
+            break;
+          }
+
+          if (retryRes.mode === 'shared') {
+            failedItems.forEach((fi) => {
+              passwordsById[fi.id] = retryRes.sharedPassword ?? '';
+            });
+          } else {
+            failedItems.forEach((fi) => {
+              passwordsById[fi.id] = retryRes.passwordsByKey?.[fi.id] ?? '';
+            });
+          }
+          pendingItems = failedItems;
+        }
+
+        if (completedOutputs.length > 0) {
+          sendBgProgress({
+            active: true,
+            percent: 97,
+            stage: `Guardando ${completedOutputs.length} archivo(s) desprotegido(s)...`,
+          });
+          const savedNames: string[] = [];
+          const updatedOutputs: ProcessedOutput[] = [];
+          for (const out of completedOutputs) {
+            const bytes = new Uint8Array(await out.blob.arrayBuffer());
+            const writeResult = await bridge.writeFile(payload.sourceDir, out.fileName, bytes);
+            const actualName =
+              typeof writeResult === 'string'
+                ? writeResult.split(/[/\\]/).pop() || out.fileName
+                : writeResult.fileName;
+            savedNames.push(actualName);
+            updatedOutputs.push({ ...out, fileName: actualName });
+          }
+          setOutputs(updatedOutputs);
+          const summary = `Guardado en ${payload.sourceDir}: ${savedNames.join(', ')}`;
+          setContextBanner(summary);
+          await bridge.completeBackgroundTask({
+            ok: true,
+            title: 'SPEED.PDF — PDF desprotegido',
+            body: summary,
+          });
+        }
+        return;
+      }
 
       sendBgProgress({
         active: true,
@@ -1153,17 +1490,6 @@ export default function App() {
           body: summary,
         });
       } else {
-        if (
-          targetTool === 'unlock' &&
-          capturedError &&
-          /contraseñ|password|clave/i.test(capturedError)
-        ) {
-          await bridge.showMainWindow();
-          setContextBanner(
-            `El archivo seleccionado requiere contraseña de apertura. Escríbela abajo y pulsa "Desproteger PDF".`
-          );
-          return;
-        }
         await bridge.completeBackgroundTask({
           ok: false,
           title: 'SPEED.PDF — No se pudo completar',
@@ -1377,7 +1703,7 @@ export default function App() {
                 vaultPassword={vaultPassword}
                 onChangeVaultPassword={setVaultPassword}
                 onExecute={() => {
-                  void executeToolWithItems(activeTool, queue);
+                  void handleExecuteActiveTool();
                 }}
               />
 
@@ -1424,7 +1750,7 @@ export default function App() {
 
             <ul className="text-xs text-slate-600 dark:text-slate-300 space-y-1.5 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 rounded-lg p-3">
               <li>
-                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Convertir a Word, JPG o Desproteger PDF
+                <strong className="font-mono text-slate-800 dark:text-slate-100">.pdf</strong> → Comprimir, Personalizar, Unir PDFs, Ordenar páginas, Convertir a Word, JPG o Desproteger PDF
               </li>
               <li>
                 <strong className="font-mono text-slate-800 dark:text-slate-100">.docx</strong> → Convertir a PDF, Unir en 1 PDF o PDFs separados
@@ -1538,6 +1864,35 @@ export default function App() {
             </p>
           </div>
         </div>
+      )}
+
+      {unlockPromptState && (
+        <UnlockPasswordsModal
+          files={unlockPromptState.filesToPrompt}
+          errorMessage={unlockPromptState.errorMessage}
+          onCancel={() => setUnlockPromptState(null)}
+          onSubmit={(res) => {
+            const currentState = unlockPromptState;
+            setUnlockPromptState(null);
+            const nextMap: Record<string, string> = {
+              ...currentState.resolvedPasswordsById,
+            };
+            if (res.mode === 'shared') {
+              currentState.filesToPrompt.forEach((f) => {
+                nextMap[f.id] = res.sharedPassword;
+              });
+            } else {
+              currentState.filesToPrompt.forEach((f) => {
+                nextMap[f.id] = res.passwordsById[f.id] ?? '';
+              });
+            }
+            void runInAppUnlock(
+              currentState.items,
+              nextMap,
+              currentState.priorOutputs
+            );
+          }}
+        />
       )}
 
       {isUpdateModalOpen && (

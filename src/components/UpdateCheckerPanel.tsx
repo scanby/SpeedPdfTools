@@ -59,6 +59,7 @@ export function UpdateCheckerPanel({ compact = false }: UpdateCheckerPanelProps)
     const response = await bridge.installUpdate({
       downloadUrl: result.installerUrl,
       fileName: result.installerName || `SPEED.PDF-${result.latestVersion || 'Update'}.exe`,
+      expectedVersion: result.latestVersion,
     });
 
     if (!response.started) {

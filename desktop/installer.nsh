@@ -53,6 +53,11 @@
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\06_Unlock" "MultiSelectModel" "Player"
   WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\06_Unlock\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=unlock --auto-convert --output-dir=source --input="%1"'
 
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\07_Organize" "MUIVerb" "Ordenar paginas PDF..."
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\07_Organize" "Icon" "$INSTDIR\SPEED.PDF.exe,0"
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\07_Organize" "MultiSelectModel" "Player"
+  WriteRegStr HKCU "Software\Classes\SpeedPdf.PdfMenu\shell\07_Organize\command" "" '"$INSTDIR\SPEED.PDF.exe" --mode=organize --ui=custom --input="%1"'
+
   ; 2. Submenú cascada SPEED.PDF para documentos .docx
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.docx\shell\SpeedPdfMenu" "MUIVerb" "SPEED.PDF"
   WriteRegStr HKCU "Software\Classes\SystemFileAssociations\.docx\shell\SpeedPdfMenu" "Icon" "$INSTDIR\SPEED.PDF.exe,0"

@@ -13,9 +13,9 @@ import {
 } from '../types/speedpdf';
 import { parsePageRange, stripExtension, yieldToMain } from './formatters';
 
-const MAX_RENDER_SIDE = 4096;
-const MAX_RENDER_AREA = 14_000_000;
-const MAX_THUMB_SIDE = 1024;
+const MAX_RENDER_SIDE = 4800;
+const MAX_RENDER_AREA = 20_000_000;
+const MAX_THUMB_SIDE = 720;
 
 function normalizeRotation(angle = 0): number {
   return ((Math.round(angle) % 360) + 360) % 360;
@@ -66,7 +66,7 @@ function releaseCanvas(canvas: HTMLCanvasElement): void {
 type PdfDocHandle = Awaited<ReturnType<typeof openPdfDocument>['promise']>;
 type PdfPageHandle = Awaited<ReturnType<PdfDocHandle['getPage']>>;
 
-function computeClampedRenderViewport(
+export function computeClampedRenderViewport(
   page: PdfPageHandle,
   targetDpi: number,
   extraRotation = 0
@@ -83,7 +83,7 @@ function computeClampedRenderViewport(
   return { baseViewport, renderViewport };
 }
 
-async function renderPageToCanvas(
+export async function renderPageToCanvas(
   page: PdfPageHandle,
   viewport: ReturnType<PdfPageHandle['getViewport']>,
   alpha = false
@@ -98,6 +98,8 @@ async function renderPageToCanvas(
     throw new Error('Contexto gráfico 2D no disponible en el navegador.');
   }
 
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
@@ -267,15 +269,47 @@ export async function inspectPdfFile(file: File): Promise<{
   }
 }
 
+export async function inspectPdfProtection(
+  file: File
+): Promise<{ requiresOpenPassword: boolean; pageCount: number }> {
+  const buffer = await file.arrayBuffer();
+  const loadingTask = openPdfDocument(new Uint8Array(buffer));
+  let pdf: PdfDocHandle;
+  try {
+    pdf = await loadingTask.promise;
+  } catch (err) {
+    await loadingTask.destroy().catch(() => {});
+    const isPasswordErr =
+      err instanceof pdfjsLib.PasswordException ||
+      (typeof err === 'object' &&
+        err !== null &&
+        'name' in err &&
+        (err as { name?: string }).name === 'PasswordException');
+    if (isPasswordErr) {
+      return { requiresOpenPassword: true, pageCount: 0 };
+    }
+    throw formatPdfOpenError(err, file.name);
+  }
+  try {
+    return { requiresOpenPassword: false, pageCount: pdf.numPages };
+  } finally {
+    await Promise.race([
+      Promise.allSettled([pdf.cleanup(), loadingTask.destroy()]),
+      new Promise((resolve) => setTimeout(resolve, 1000)),
+    ]);
+  }
+}
+
 export async function unlockPdf(
   file: File,
   settings: UnlockPdfSettings,
   onProgress: (state: ProgressState) => void,
-  extraRotation = 0
+  extraRotation = 0,
+  passwordOverride?: string
 ): Promise<{ blob: Blob; fileName: string; pageCount: number; wasProtected: boolean }> {
   const sourceBytes = new Uint8Array(await file.arrayBuffer());
   const rotNorm = snapRotation90(extraRotation);
-  const password = settings.password.trim();
+  const password = (passwordOverride !== undefined ? passwordOverride : settings.password).trim();
 
   onProgress({
     active: true,
@@ -859,7 +893,12 @@ async function normalizeImageBytesForPdf(
       el.src = url;
     });
 
-    const isPng = file.type === 'image/png' || file.name.toLowerCase().endsWith('.png');
+    const lowerName = file.name.toLowerCase();
+    const isPng = file.type === 'image/png' || lowerName.endsWith('.png');
+    const isJpeg =
+      file.type === 'image/jpeg' || lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg');
+
+    // Conservar bytes originales sin recomprimir cuando no hay rotación y la calidad es alta/original
     if (rotNorm === 0 && isPng && jpegQuality >= 0.92) {
       return {
         bytes: new Uint8Array(await file.arrayBuffer()),
@@ -869,7 +908,7 @@ async function normalizeImageBytesForPdf(
       };
     }
 
-    if (rotNorm === 0 && file.type === 'image/jpeg' && jpegQuality >= 0.92) {
+    if (rotNorm === 0 && isJpeg && jpegQuality >= 0.92) {
       return {
         bytes: new Uint8Array(await file.arrayBuffer()),
         kind: 'jpg',
@@ -885,10 +924,14 @@ async function normalizeImageBytesForPdf(
     const canvas = document.createElement('canvas');
     canvas.width = outW;
     canvas.height = outH;
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const ctx = canvas.getContext('2d', { alpha: isPng });
     if (!ctx) throw new Error('Contexto gráfico no disponible.');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    if (!isPng) {
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
     ctx.save();
     ctx.translate(outW / 2, outH / 2);
@@ -896,7 +939,18 @@ async function normalizeImageBytesForPdf(
     ctx.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
     ctx.restore();
 
-    const blob = await canvasToBlob(canvas, 'image/jpeg', jpegQuality);
+    if (isPng) {
+      const blob = await canvasToBlob(canvas, 'image/png');
+      releaseCanvas(canvas);
+      return {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        kind: 'png',
+        width: outW,
+        height: outH,
+      };
+    }
+
+    const blob = await canvasToBlob(canvas, 'image/jpeg', Math.min(0.96, Math.max(0.7, jpegQuality)));
     releaseCanvas(canvas);
     return {
       bytes: new Uint8Array(await blob.arrayBuffer()),
@@ -1009,9 +1063,10 @@ export async function getPdfPageCount(file: File): Promise<number> {
   }
 }
 
-export async function renderPdfAllPageThumbnails(
+export async function openPdfForOrganizerAndRenderThumbnails(
   file: File,
-  onPageRendered: (pageNumber: number, thumbnailUrl: string) => void,
+  onReady: (totalPages: number) => void,
+  onBatchRendered: (thumbnailsByPage: Record<number, string>, failedPages: number[]) => void,
   isCancelled?: () => boolean
 ): Promise<number> {
   const buffer = await file.arrayBuffer();
@@ -1026,36 +1081,86 @@ export async function renderPdfAllPageThumbnails(
 
   try {
     const totalPages = pdf.numPages;
+    onReady(totalPages);
+
+    if (isCancelled?.() || totalPages === 0) {
+      return totalPages;
+    }
+
+    let pendingThumbs: Record<number, string> = {};
+    let pendingFailed: number[] = [];
+    let pendingCount = 0;
+
+    const flushBatch = () => {
+      if (pendingCount === 0 || isCancelled?.()) return;
+      const thumbs = pendingThumbs;
+      const failed = pendingFailed;
+      pendingThumbs = {};
+      pendingFailed = [];
+      pendingCount = 0;
+      onBatchRendered(thumbs, failed);
+    };
+
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
       if (isCancelled?.()) break;
 
-      const page = await pdf.getPage(pageNum);
-      const rot = snapRotation90(page.rotate || 0);
-      const baseViewport = page.getViewport({ scale: 1, rotation: rot });
-      const targetWidth = 180;
-      const scale = Math.min(
-        targetWidth / Math.max(1, baseViewport.width),
-        MAX_THUMB_SIDE / Math.max(1, baseViewport.height)
-      );
-      const viewport = page.getViewport({ scale: Math.max(0.05, scale), rotation: rot });
-
-      const canvas = await renderPageToCanvas(page, viewport, false);
       try {
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.74);
-        if (!isCancelled?.()) {
-          onPageRendered(pageNum, dataUrl);
+        const page = await pdf.getPage(pageNum);
+        const rot = snapRotation90(page.rotate || 0);
+        const baseViewport = page.getViewport({ scale: 1, rotation: rot });
+        const targetWidth = 144;
+        const scale = Math.min(
+          targetWidth / Math.max(1, baseViewport.width),
+          MAX_THUMB_SIDE / Math.max(1, baseViewport.height)
+        );
+        const viewport = page.getViewport({ scale: Math.max(0.05, scale), rotation: rot });
+        const canvas = await renderPageToCanvas(page, viewport, false);
+        try {
+          pendingThumbs[pageNum] = canvas.toDataURL('image/jpeg', 0.7);
+          pendingCount += 1;
+        } finally {
+          releaseCanvas(canvas);
+          page.cleanup();
         }
-      } finally {
-        releaseCanvas(canvas);
-        page.cleanup();
+      } catch {
+        pendingFailed.push(pageNum);
+        pendingCount += 1;
+      }
+
+      if (pendingCount >= 4 || pageNum === totalPages) {
+        flushBatch();
       }
       await yieldToMain();
     }
+
+    flushBatch();
     return totalPages;
   } finally {
-    await pdf.cleanup();
-    await loadingTask.destroy();
+    await Promise.race([
+      Promise.allSettled([
+        pdf.cleanup().catch(() => {}),
+        loadingTask.destroy().catch(() => {}),
+      ]),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ]);
   }
+}
+
+export async function renderPdfAllPageThumbnails(
+  file: File,
+  onPageRendered: (pageNumber: number, thumbnailUrl: string) => void,
+  isCancelled?: () => boolean
+): Promise<number> {
+  return openPdfForOrganizerAndRenderThumbnails(
+    file,
+    () => {},
+    (batch) => {
+      for (const [k, url] of Object.entries(batch)) {
+        onPageRendered(Number(k), url);
+      }
+    },
+    isCancelled
+  );
 }
 
 export async function assembleOrganizedPdf(

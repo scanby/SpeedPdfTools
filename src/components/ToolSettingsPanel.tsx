@@ -432,7 +432,7 @@ export function ToolSettingsPanel({
       )}
 
       {activeTool === 'pdf-to-img' && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="space-y-1.5">
             <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
               Formato de salida
@@ -467,12 +467,30 @@ export function ToolSettingsPanel({
               onChange={(e) => onChangeImageExport({ ...imageExport, dpi: Number(e.target.value) })}
               className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
             >
-              <option value={72}>72 DPI (Pantalla ligera)</option>
-              <option value={150}>150 DPI (Uso general)</option>
-              <option value={220}>220 DPI (Alta nitidez)</option>
-              <option value={300}>300 DPI (Impresión)</option>
+              <option value={150}>150 DPI (Estándar)</option>
+              <option value={220}>220 DPI (Alta nitidez · Recomendado)</option>
+              <option value={300}>300 DPI (Impresión profesional)</option>
             </select>
           </label>
+
+          {imageExport.format === 'jpeg' && (
+            <label className="space-y-1.5">
+              <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                Calidad JPG
+              </span>
+              <select
+                value={imageExport.quality}
+                onChange={(e) =>
+                  onChangeImageExport({ ...imageExport, quality: Number(e.target.value) })
+                }
+                className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+              >
+                <option value={0.85}>85% (Ligero)</option>
+                <option value={0.94}>94% (Alta fidelidad · Recomendado)</option>
+                <option value={0.98}>98% (Máxima nitidez)</option>
+              </select>
+            </label>
+          )}
 
           <div className="flex items-end pb-2">
             <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
@@ -491,7 +509,7 @@ export function ToolSettingsPanel({
       )}
 
       {activeTool === 'img-to-pdf' && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <label className="space-y-1.5">
             <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
               Tamaño de página
@@ -548,60 +566,124 @@ export function ToolSettingsPanel({
               <option value={36}>Margen estándar (36 pt)</option>
             </select>
           </label>
+
+          <label className="space-y-1.5">
+            <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+              Calidad de imagen
+            </span>
+            <select
+              value={imageToPdf.jpegQuality}
+              onChange={(e) =>
+                onChangeImageToPdf({ ...imageToPdf, jpegQuality: Number(e.target.value) })
+              }
+              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+            >
+              <option value={0.95}>Original / Sin recomprimir (Recomendado)</option>
+              <option value={0.9}>Alta calidad (90%)</option>
+              <option value={0.8}>Equilibrada (80%)</option>
+            </select>
+          </label>
         </div>
       )}
 
       {(activeTool === 'pdf-to-word' || activeTool === 'word-to-pdf') && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <label className="space-y-1.5">
-            <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-              Tamaño base de página
-            </span>
-            <select
-              value={wordSettings.pageSize}
-              onChange={(e) =>
-                onChangeWordSettings({
-                  ...wordSettings,
-                  pageSize: e.target.value as 'a4' | 'letter',
-                })
-              }
-              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            >
-              <option value="a4">A4 (210 × 297 mm)</option>
-              <option value="letter">Carta (8.5 × 11 in)</option>
-            </select>
-          </label>
-
-          <label className="space-y-1.5">
-            <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
-              Cuerpo tipográfico
-            </span>
-            <select
-              value={wordSettings.fontSize}
-              onChange={(e) =>
-                onChangeWordSettings({ ...wordSettings, fontSize: Number(e.target.value) })
-              }
-              className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
-            >
-              <option value={10}>10 pt (Compacto)</option>
-              <option value={11}>11 pt (Estándar)</option>
-              <option value={12}>12 pt (Lectura amplia)</option>
-            </select>
-          </label>
-
-          <div className="flex items-end pb-2">
-            <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={wordSettings.preservePageBreaks}
-                onChange={(e) =>
-                  onChangeWordSettings({ ...wordSettings, preservePageBreaks: e.target.checked })
+        <div className="space-y-4">
+          {activeTool === 'pdf-to-word' && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeWordSettings({ ...wordSettings, fidelityMode: 'editable' })
                 }
-                className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
-              />
-              <span>Conservar saltos de página originales</span>
-            </label>
-          </div>
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  wordSettings.fidelityMode === 'editable'
+                    ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40 text-slate-900 dark:text-white'
+                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div className="text-sm font-medium">Texto editable (estilos y columnas)</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Extrae párrafos editables con negritas/cursivas, encabezados y captura nítida para escaneos
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  onChangeWordSettings({ ...wordSettings, fidelityMode: 'visual' })
+                }
+                className={`p-3 rounded-lg border text-left transition-colors ${
+                  wordSettings.fidelityMode === 'visual'
+                    ? 'border-blue-600 bg-blue-50/70 dark:bg-blue-950/40 text-slate-900 dark:text-white'
+                    : 'border-slate-200 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 text-slate-700 dark:text-slate-300'
+                }`}
+              >
+                <div className="text-sm font-medium">Diseño exacto 1:1 (fidelidad visual)</div>
+                <div className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                  Conserva tablas complejas, gráficos y diseño idéntico al PDF original (210 DPI)
+                </div>
+              </button>
+            </div>
+          )}
+
+          {(activeTool === 'word-to-pdf' || wordSettings.fidelityMode !== 'visual') && (
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Tamaño base de página
+                </span>
+                <select
+                  value={wordSettings.pageSize}
+                  onChange={(e) =>
+                    onChangeWordSettings({
+                      ...wordSettings,
+                      pageSize: e.target.value as 'a4' | 'letter',
+                    })
+                  }
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                >
+                  <option value="a4">A4 (210 × 297 mm)</option>
+                  <option value="letter">Carta (8.5 × 11 in)</option>
+                </select>
+              </label>
+
+              <label className="space-y-1.5">
+                <span className="block text-xs font-medium text-slate-700 dark:text-slate-300">
+                  Cuerpo tipográfico
+                </span>
+                <select
+                  value={wordSettings.fontSize}
+                  onChange={(e) =>
+                    onChangeWordSettings({ ...wordSettings, fontSize: Number(e.target.value) })
+                  }
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100"
+                >
+                  <option value={10}>10 pt (Compacto)</option>
+                  <option value={11}>11 pt (Estándar)</option>
+                  <option value={12}>12 pt (Lectura amplia)</option>
+                </select>
+              </label>
+
+              {activeTool === 'pdf-to-word' && (
+                <div className="flex items-end pb-2">
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-700 dark:text-slate-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={wordSettings.preservePageBreaks}
+                      onChange={(e) =>
+                        onChangeWordSettings({
+                          ...wordSettings,
+                          preservePageBreaks: e.target.checked,
+                        })
+                      }
+                      className="rounded border-slate-300 dark:border-slate-700 accent-blue-600"
+                    />
+                    <span>Conservar saltos de página originales</span>
+                  </label>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

@@ -32,6 +32,19 @@ export interface DesktopUpdateProgress {
   message: string;
 }
 
+export interface UnlockPromptFileEntry {
+  key: string;
+  name: string;
+  path?: string;
+}
+
+export interface UnlockPromptResult {
+  cancelled: boolean;
+  mode?: 'shared' | 'per-file';
+  sharedPassword?: string;
+  passwordsByKey?: Record<string, string>;
+}
+
 export interface BackgroundProgressPayload {
   percent: number;
   stage: string;
@@ -57,6 +70,7 @@ export interface SpeedPdfDesktopApi {
   signalReady: () => void;
   showMainWindow: () => Promise<void>;
   reportBackgroundProgress: (progress: BackgroundProgressPayload) => void;
+  cancelBackgroundTask: () => Promise<void>;
   completeBackgroundTask: (info: { ok: boolean; title: string; body: string }) => Promise<void>;
   getShellStatus: () => Promise<DesktopShellStatus>;
   installShellMenu: () => Promise<DesktopShellStatus>;
@@ -64,8 +78,17 @@ export interface SpeedPdfDesktopApi {
   installUpdate: (params: {
     downloadUrl: string;
     fileName: string;
+    expectedVersion?: string;
   }) => Promise<{ started: boolean; error?: string }>;
   onUpdateProgress: (callback: (progress: DesktopUpdateProgress) => void) => () => void;
+  promptUnlockPasswords: (params: {
+    files: UnlockPromptFileEntry[];
+    errorMessage?: string;
+  }) => Promise<UnlockPromptResult>;
+  renderHtmlToPdf: (params: {
+    html: string;
+    pageSize: 'a4' | 'letter';
+  }) => Promise<Uint8Array>;
 }
 
 declare global {
@@ -78,6 +101,12 @@ export function getDesktopBridge(): SpeedPdfDesktopApi | null {
   return typeof window !== 'undefined' && window.speedPdfDesktop?.isDesktop
     ? window.speedPdfDesktop
     : null;
+}
+
+const desktopFilePathMap = new WeakMap<File, string>();
+
+export function getDesktopFilePath(file: File): string | undefined {
+  return desktopFilePathMap.get(file);
 }
 
 export function desktopResultToFile(item: DesktopReadFileResult): File {
@@ -94,8 +123,12 @@ export function desktopResultToFile(item: DesktopReadFileResult): File {
     ? 'image/jpeg'
     : 'application/octet-stream';
 
-  return new File([new Uint8Array(item.data)], item.name, {
+  const file = new File([new Uint8Array(item.data)], item.name, {
     type: mime,
     lastModified: item.lastModified,
   });
+  if (item.path) {
+    desktopFilePathMap.set(file, item.path);
+  }
+  return file;
 }

@@ -40,4 +40,9 @@ contextBridge.exposeInMainWorld('speedPdfDesktop', {
     ipcRenderer.on('speedpdf:update-progress', handler);
     return () => ipcRenderer.removeListener('speedpdf:update-progress', handler);
   },
+  promptUnlockPasswords: (params) => ipcRenderer.invoke('speedpdf:prompt-unlock-passwords', params),
+  getUnlockPromptData: () => ipcRenderer.invoke('speedpdf:get-unlock-prompt-data'),
+  submitUnlockPrompt: (result) => ipcRenderer.invoke('speedpdf:submit-unlock-prompt', result),
+  cancelUnlockPrompt: () => ipcRenderer.invoke('speedpdf:cancel-unlock-prompt'),
+  renderHtmlToPdf: (params) => ipcRenderer.invoke('speedpdf:html-to-pdf', params),
 });
