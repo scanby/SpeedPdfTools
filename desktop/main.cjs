@@ -1545,6 +1545,10 @@ async function verifyDownloadedExecutable(filePath) {
   }
 }
 
+function sanitizeBatchValue(value) {
+  return String(value || '').replace(/["\r\n]/g, '');
+}
+
 ipcMain.handle(
   'speedpdf:install-update',
   async (_event, { downloadUrl, fileName, expectedVersion }) => {
@@ -1567,16 +1571,27 @@ ipcMain.handle(
     const safeName = path.basename(fileName || 'SPEED.PDF-Update.exe');
     const cleanExpectedVer = String(expectedVersion || '')
       .trim()
-      .replace(/^v/i, '');
-    const tempDownloadPath = path.join(
-      app.getPath('temp'),
-      `speedpdf_dl_${Date.now()}_${safeName}`
-    );
+      .replace(/^v/i, '')
+      .replace(/[^0-9A-Za-z._-]/g, '');
+    const updatesDir = path.join(app.getPath('userData'), 'updates');
+    await fsp.mkdir(updatesDir, { recursive: true });
+    try {
+      const existing = await fsp.readdir(updatesDir);
+      await Promise.all(
+        existing
+          .filter((name) => /\.(exe|cmd|bat)$/i.test(name))
+          .map((name) => fsp.unlink(path.join(updatesDir, name)).catch(() => {}))
+      );
+    } catch {
+      // ignore cleanup failure
+    }
+
+    const downloadPath = path.join(updatesDir, safeName);
     const updaterLogPath = path.join(app.getPath('userData'), 'speedpdf-updater.log');
 
     try {
       sendProgress('downloading', 2, `Descargando ${safeName}...`);
-      await downloadFileWithProgress(downloadUrl, tempDownloadPath, (pct, received, total) => {
+      await downloadFileWithProgress(downloadUrl, downloadPath, (pct, received, total) => {
         const mbDone = (received / (1024 * 1024)).toFixed(1);
         const mbTotal = (total / (1024 * 1024)).toFixed(1);
         sendProgress(
@@ -1586,177 +1601,155 @@ ipcMain.handle(
         );
       });
 
-      await verifyDownloadedExecutable(tempDownloadPath);
+      await verifyDownloadedExecutable(downloadPath);
 
-      sendProgress('installing', 100, 'Instalando actualización y reiniciando SPEED.PDF...');
+      sendProgress('installing', 100, 'Iniciando instalación y reiniciando SPEED.PDF...');
 
       const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
-      const scriptPath = path.join(app.getPath('temp'), `speedpdf_updater_${Date.now()}.ps1`);
-      let psLines;
-
-      const commonHeaderLines = [
-        `$logPath = '${escapePsSingleQuoted(updaterLogPath)}'`,
-        'function Write-UpdaterLog([string]$msg) {',
-        '  try {',
-        '    $dir = Split-Path -Parent $logPath',
-        '    if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }',
-        '    $line = "[$(Get-Date -Format o)] $msg"',
-        '    Add-Content -LiteralPath $logPath -Value $line -Encoding UTF8',
-        '  } catch {}',
-        '}',
-        `Write-UpdaterLog "Iniciando actualizacion hacia ${escapePsSingleQuoted(safeName)} (esperada: '${escapePsSingleQuoted(cleanExpectedVer)}')"`,
-        `$targetPid = ${process.pid}`,
-        '$deadline = (Get-Date).AddSeconds(15)',
-        'while ((Get-Date) -lt $deadline) {',
-        '  $mainAlive = Get-Process -Id $targetPid -ErrorAction SilentlyContinue',
-        "  $procs = Get-Process -Name 'SPEED.PDF' -ErrorAction SilentlyContinue",
-        '  if (-not $mainAlive -and -not $procs) { break }',
-        '  if ((Get-Date) -gt $deadline.AddSeconds(-11)) {',
-        '    if ($mainAlive) { Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue }',
-        '    if ($procs) { $procs | Stop-Process -Force -ErrorAction SilentlyContinue }',
-        '  }',
-        '  Start-Sleep -Milliseconds 350',
-        '}',
-        'Start-Sleep -Milliseconds 900',
-      ];
+      const scriptPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.cmd`);
+      let cmdLines;
 
       if (portableExe && /portable/i.test(safeName)) {
         const targetDir = path.dirname(portableExe);
         const nextPortablePath = path.join(targetDir, safeName);
-        psLines = [
-          ...commonHeaderLines,
-          `$src = '${escapePsSingleQuoted(tempDownloadPath)}'`,
-          `$dst = '${escapePsSingleQuoted(nextPortablePath)}'`,
-          `$old = '${escapePsSingleQuoted(portableExe)}'`,
-          '$copied = $false',
-          'for ($i = 0; $i -lt 12; $i++) {',
-          '  try {',
-          '    Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop',
-          '    $copied = $true',
-          '    break',
-          '  } catch {',
-          '    Start-Sleep -Milliseconds 500',
-          '  }',
-          '}',
-          'if ($copied -and (Test-Path -LiteralPath $dst)) {',
-          '  Write-UpdaterLog "Portable actualizado en $dst"',
-          '  Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue',
-          '  if (($dst -ne $old) -and (Test-Path -LiteralPath $old)) {',
-          '    Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue',
-          '  }',
-          '  Start-Process -FilePath $dst',
-          '} else {',
-          '  Write-UpdaterLog "No se pudo sobrescribir el Portable; ejecutando descarga directamente."',
-          '  Start-Process -FilePath $src',
-          '}',
-          'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
+        cmdLines = [
+          '@echo off',
+          'chcp 65001 >nul',
+          'title Actualizando SPEED.PDF Portable',
+          `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
+          `set "SRC=${sanitizeBatchValue(downloadPath)}"`,
+          `set "DST=${sanitizeBatchValue(nextPortablePath)}"`,
+          `set "OLD=${sanitizeBatchValue(portableExe)}"`,
+          `set "TARGET_PID=${process.pid}"`,
+          'call :log "Iniciando actualizacion Portable hacia %DST%"',
+          'ping 127.0.0.1 -n 3 >nul',
+          'taskkill /F /PID %TARGET_PID% >nul 2>&1',
+          'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
+          'ping 127.0.0.1 -n 2 >nul',
+          'set "COPIED=0"',
+          'for /L %%N in (1,1,12) do (',
+          '  copy /Y "%SRC%" "%DST%" >nul 2>&1',
+          '  if not errorlevel 1 (',
+          '    set "COPIED=1"',
+          '    goto :after_copy',
+          '  )',
+          '  ping 127.0.0.1 -n 2 >nul',
+          ')',
+          ':after_copy',
+          'if "%COPIED%"=="1" if exist "%DST%" (',
+          '  call :log "Portable actualizado en %DST%"',
+          '  del "%SRC%" >nul 2>&1',
+          '  if /I not "%DST%"=="%OLD%" if exist "%OLD%" del "%OLD%" >nul 2>&1',
+          '  start "" "%DST%"',
+          '  goto :cleanup',
+          ')',
+          'call :log "No se pudo reemplazar el Portable; ejecutando descarga directamente: %SRC%"',
+          'start "" "%SRC%"',
+          'goto :cleanup',
+          ':log',
+          'for %%I in ("%LOG_PATH%") do if not exist "%%~dpI" mkdir "%%~dpI" >nul 2>&1',
+          'echo [%DATE% %TIME%] %~1>> "%LOG_PATH%" 2>nul',
+          'goto :eof',
+          ':cleanup',
+          '(goto) 2>nul & del "%~f0"',
         ];
       } else {
         const relaunchExe = portableExe || process.execPath;
-        psLines = [
-          ...commonHeaderLines,
-          `$inst = '${escapePsSingleQuoted(tempDownloadPath)}'`,
-          `$app = '${escapePsSingleQuoted(relaunchExe)}'`,
-          `$expectedVer = '${escapePsSingleQuoted(cleanExpectedVer)}'`,
-          'function Get-InstalledAppVersion([string]$exePath) {',
-          '  try {',
-          '    if (-not $exePath -or -not (Test-Path -LiteralPath $exePath)) { return "" }',
-          '    $dir = Split-Path -Parent $exePath',
-          '    $pkg = Join-Path $dir "resources\\app\\package.json"',
-          '    if (Test-Path -LiteralPath $pkg) {',
-          '      $txt = [System.IO.File]::ReadAllText($pkg)',
-          '      if ($txt -match \'"version"\\s*:\\s*"([^"]+)"\') { return $matches[1] }',
-          '    }',
-          '  } catch {}',
-          '  return ""',
-          '}',
-          '$launchCandidates = @(',
-          '  "$env:ProgramFiles\\SPEED.PDF\\SPEED.PDF.exe",',
-          '  "${env:ProgramFiles(x86)}\\SPEED.PDF\\SPEED.PDF.exe",',
-          '  "$env:LOCALAPPDATA\\Programs\\SPEED.PDF\\SPEED.PDF.exe",',
-          '  $app',
-          ') | Select-Object -Unique',
-          '$beforeTime = if (Test-Path -LiteralPath $app) { (Get-Item -LiteralPath $app).LastWriteTimeUtc } else { [datetime]::MinValue }',
-          '$beforeVer = Get-InstalledAppVersion $app',
-          'Write-UpdaterLog "Instalacion previa: exe=$app ver=$beforeVer"',
-          '$silentOk = $false',
-          'try {',
-          "  $proc = Start-Process -FilePath $inst -ArgumentList '/S' -Verb RunAs -Wait -PassThru -ErrorAction Stop",
-          '  $code = if ($null -ne $proc) { $proc.ExitCode } else { -1 }',
-          '  Write-UpdaterLog "Instalador silencioso elevado finalizo con ExitCode=$code"',
-          '  if ($code -eq 0) {',
-          '    $silentOk = $true',
-          '  }',
-          '} catch {',
-          '  Write-UpdaterLog ("Fallo instalacion silenciosa elevada: " + $_.Exception.Message)',
-          '}',
-          '$bestExe = $null',
-          'foreach ($cand in $launchCandidates) {',
-          '  if (-not $cand -or -not (Test-Path -LiteralPath $cand)) { continue }',
-          '  $candVer = Get-InstalledAppVersion $cand',
-          '  if ($expectedVer -and ($candVer -eq $expectedVer)) {',
-          '    $bestExe = $cand',
-          '    break',
-          '  }',
-          '}',
-          'if (-not $bestExe -and $silentOk) {',
-          '  foreach ($cand in $launchCandidates) {',
-          '    if (-not $cand -or -not (Test-Path -LiteralPath $cand)) { continue }',
-          '    $candTime = (Get-Item -LiteralPath $cand).LastWriteTimeUtc',
-          '    if ($candTime -gt $beforeTime) {',
-          '      $bestExe = $cand',
-          '      break',
-          '    }',
-          '  }',
-          '}',
-          'if ($silentOk -and ($bestExe -or -not $expectedVer)) {',
-          '  $toLaunch = if ($bestExe) { $bestExe } else { $app }',
-          '  Write-UpdaterLog "Actualizacion verificada. Iniciando $toLaunch"',
-          '  Remove-Item -LiteralPath $inst -Force -ErrorAction SilentlyContinue',
-          '  if ($toLaunch -and (Test-Path -LiteralPath $toLaunch)) {',
-          '    Start-Process -FilePath $toLaunch',
-          '  }',
-          '} else {',
-          '  Write-UpdaterLog "No se confirmo instalacion silenciosa; abriendo asistente visual $inst"',
-          '  try {',
-          '    Start-Process -FilePath $inst -ErrorAction Stop',
-          '  } catch {',
-          '    Write-UpdaterLog ("Error al abrir asistente visual: " + $_.Exception.Message)',
-          '  }',
-          '}',
-          'Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue',
+        const currentAppDir = path.dirname(relaunchExe);
+        cmdLines = [
+          '@echo off',
+          'chcp 65001 >nul',
+          'title Actualizando SPEED.PDF',
+          `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
+          `set "INST=${sanitizeBatchValue(downloadPath)}"`,
+          `set "INST_NAME=${sanitizeBatchValue(safeName)}"`,
+          `set "APP_EXE=${sanitizeBatchValue(relaunchExe)}"`,
+          `set "APP_DIR=${sanitizeBatchValue(currentAppDir)}"`,
+          `set "EXPECTED_VER=${sanitizeBatchValue(cleanExpectedVer)}"`,
+          `set "TARGET_PID=${process.pid}"`,
+          'call :log "Iniciando actualizacion hacia %INST_NAME% (esperada: %EXPECTED_VER%)"',
+          'echo Cerrando SPEED.PDF para instalar la nueva version...',
+          'ping 127.0.0.1 -n 3 >nul',
+          'taskkill /F /PID %TARGET_PID% >nul 2>&1',
+          'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
+          'ping 127.0.0.1 -n 2 >nul',
+          'call :log "Lanzando instalador silencioso..."',
+          'if not exist "%APP_EXE%" goto :run_silent_default',
+          'start "Instalador SPEED.PDF" /WAIT "%INST%" /S /D=%APP_DIR%',
+          'goto :after_silent_run',
+          ':run_silent_default',
+          'start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
+          ':after_silent_run',
+          'set "INST_EXIT=%ERRORLEVEL%"',
+          'call :log "Instalador silencioso finalizo con ExitCode=%INST_EXIT%"',
+          'set /a WAIT_TRIES=0',
+          ':wait_inst_loop',
+          'tasklist /FO CSV /NH /FI "IMAGENAME eq %INST_NAME%" 2>nul | find /I "%INST_NAME%" >nul',
+          'if errorlevel 1 goto :after_wait_inst',
+          'if %WAIT_TRIES% GEQ 30 goto :after_wait_inst',
+          'set /a WAIT_TRIES+=1',
+          'ping 127.0.0.1 -n 2 >nul',
+          'goto :wait_inst_loop',
+          ':after_wait_inst',
+          'set "UPDATED_EXE="',
+          'if "%EXPECTED_VER%"=="" goto :check_exit_only',
+          'call :check_ver "%APP_EXE%"',
+          'if defined UPDATED_EXE goto :launch_updated',
+          'call :check_ver "%ProgramFiles%\\SPEED.PDF\\SPEED.PDF.exe"',
+          'if defined UPDATED_EXE goto :launch_updated',
+          'call :check_ver "%ProgramFiles(x86)%\\SPEED.PDF\\SPEED.PDF.exe"',
+          'if defined UPDATED_EXE goto :launch_updated',
+          'call :check_ver "%LOCALAPPDATA%\\Programs\\SPEED.PDF\\SPEED.PDF.exe"',
+          'if defined UPDATED_EXE goto :launch_updated',
+          'goto :fallback_visual',
+          ':check_exit_only',
+          'if "%INST_EXIT%"=="0" if exist "%APP_EXE%" set "UPDATED_EXE=%APP_EXE%"',
+          'if defined UPDATED_EXE goto :launch_updated',
+          ':fallback_visual',
+          'call :log "No se confirmo instalacion silenciosa; abriendo asistente visual: %INST%"',
+          'start "" "%INST%"',
+          'goto :cleanup',
+          ':launch_updated',
+          'call :log "Actualizacion verificada. Iniciando %UPDATED_EXE%"',
+          'del "%INST%" >nul 2>&1',
+          'start "" "%UPDATED_EXE%"',
+          'goto :cleanup',
+          ':check_ver',
+          'set "CAND=%~1"',
+          'if "%CAND%"=="" goto :eof',
+          'if not exist "%CAND%" goto :eof',
+          'for %%I in ("%CAND%") do set "CAND_DIR=%%~dpI"',
+          'set "PKG=%CAND_DIR%resources\\app\\package.json"',
+          'if not exist "%PKG%" goto :eof',
+          'findstr /C:"\\"version\\": \\"%EXPECTED_VER%\\"" "%PKG%" >nul 2>&1',
+          'if not errorlevel 1 (',
+          '  set "UPDATED_EXE=%CAND%"',
+          '  goto :eof',
+          ')',
+          'findstr /C:"\\"version\\":\\"%EXPECTED_VER%\\"" "%PKG%" >nul 2>&1',
+          'if not errorlevel 1 set "UPDATED_EXE=%CAND%"',
+          'goto :eof',
+          ':log',
+          'for %%I in ("%LOG_PATH%") do if not exist "%%~dpI" mkdir "%%~dpI" >nul 2>&1',
+          'echo [%DATE% %TIME%] %~1>> "%LOG_PATH%" 2>nul',
+          'goto :eof',
+          ':cleanup',
+          '(goto) 2>nul & del "%~f0"',
         ];
       }
 
-      const utf8BomScript = Buffer.concat([
-        Buffer.from([0xef, 0xbb, 0xbf]),
-        Buffer.from(psLines.join('\r\n'), 'utf8'),
-      ]);
-      await fsp.writeFile(scriptPath, utf8BomScript);
+      // Importante: los archivos .cmd NO deben llevar BOM UTF-8
+      await fsp.writeFile(scriptPath, `${cmdLines.join('\r\n')}\r\n`, 'utf8');
 
       const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-      const psCandidate = path.join(
-        systemRoot,
-        'System32',
-        'WindowsPowerShell',
-        'v1.0',
-        'powershell.exe'
-      );
-      const psExe = fs.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
+      const cmdCandidate = path.join(systemRoot, 'System32', 'cmd.exe');
+      const cmdExe = fs.existsSync(cmdCandidate) ? cmdCandidate : 'cmd.exe';
 
       await new Promise((resolve, reject) => {
         let settled = false;
         const child = spawn(
-          psExe,
-          [
-            '-NoProfile',
-            '-ExecutionPolicy',
-            'Bypass',
-            '-WindowStyle',
-            'Hidden',
-            '-File',
-            scriptPath,
-          ],
+          cmdExe,
+          ['/d', '/c', 'start', 'Actualizando SPEED.PDF', '/MIN', scriptPath],
           { detached: true, windowsHide: true, stdio: 'ignore' }
         );
 
@@ -1774,7 +1767,11 @@ ipcMain.handle(
         });
       });
 
+      app.releaseSingleInstanceLock();
       setTimeout(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.close();
+        }
         app.quit();
       }, 450);
 
