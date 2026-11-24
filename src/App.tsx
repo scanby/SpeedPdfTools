@@ -1298,14 +1298,22 @@ export default function App() {
         return;
       }
 
+      let maxBgPercent = 12;
       const sendBgProgress = (state: ProgressState) => {
+        const rawPct = Math.max(0, Math.min(100, Number(state.percent || 0)));
+        const monotonicPct = Math.max(maxBgPercent, rawPct);
+        maxBgPercent = monotonicPct;
+        const pageDetail =
+          state.currentPage && state.totalPages
+            ? `Página ${state.currentPage} de ${state.totalPages} · Destino: ${payload.sourceDir}`
+            : `Destino: ${payload.sourceDir}`;
         bridge.reportBackgroundProgress({
-          percent: state.percent,
+          percent: monotonicPct,
           stage: state.stage,
           currentPage: state.currentPage,
           totalPages: state.totalPages,
           fileCount: files.length,
-          detail: `Destino: ${payload.sourceDir}`,
+          detail: pageDetail,
           status: 'active',
         });
       };
@@ -1361,11 +1369,29 @@ export default function App() {
         const started = performance.now();
 
         try {
-          for (const item of pdfItems) {
+          const totalProtectFiles = pdfItems.length;
+          for (let idx = 0; idx < totalProtectFiles; idx++) {
+            const item = pdfItems[idx];
+            const perFileProgress = (state: ProgressState) => {
+              if (totalProtectFiles <= 1) {
+                sendBgProgress(state);
+                return;
+              }
+              const basePct = 12 + (idx / totalProtectFiles) * 82;
+              const spanPct = 82 / totalProtectFiles;
+              const scaledPct = Math.round(
+                basePct + (Math.max(0, Math.min(100, Number(state.percent || 0))) / 100) * spanPct
+              );
+              sendBgProgress({
+                ...state,
+                percent: Math.min(95, scaledPct),
+                stage: `[${idx + 1}/${totalProtectFiles}] ${state.stage}`,
+              });
+            };
             const res = await protectPdf(
               item.file,
               effectiveSettings,
-              sendBgProgress,
+              perFileProgress,
               item.rotation ?? 0
             );
             const finalName = resolveUniqueFileName(res.fileName, usedOutputNamesLower);
@@ -1484,14 +1510,32 @@ export default function App() {
         while (pendingItems.length > 0) {
           const failedItems: QueueFileItem[] = [];
           let firstPwError: string | null = null;
+          const totalUnlockFiles = pdfItems.length;
 
           for (const item of pendingItems) {
             try {
               const started = performance.now();
+              const completedBefore = completedOutputs.length;
+              const perFileProgress = (state: ProgressState) => {
+                if (totalUnlockFiles <= 1) {
+                  sendBgProgress(state);
+                  return;
+                }
+                const basePct = 12 + (completedBefore / totalUnlockFiles) * 82;
+                const spanPct = 82 / totalUnlockFiles;
+                const scaledPct = Math.round(
+                  basePct + (Math.max(0, Math.min(100, Number(state.percent || 0))) / 100) * spanPct
+                );
+                sendBgProgress({
+                  ...state,
+                  percent: Math.min(95, scaledPct),
+                  stage: `[${completedBefore + 1}/${totalUnlockFiles}] ${state.stage}`,
+                });
+              };
               const res = await unlockPdf(
                 item.file,
                 unlockSettings,
-                sendBgProgress,
+                perFileProgress,
                 item.rotation ?? 0,
                 passwordsById[item.id]
               );

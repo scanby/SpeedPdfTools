@@ -88,6 +88,8 @@ const UTF8_TEXT_EXTS = new Set(['.html', '.js', '.mjs', '.css', '.json', '.svg']
 
 let mainWindow = null;
 let progressWindow = null;
+let progressWindowReady = false;
+let suppressProgressWindowQuit = false;
 let lastProgressPayload = {
   percent: 8,
   stage: 'Iniciando procesamiento local...',
@@ -242,7 +244,7 @@ function buildProgressWindowHtml() {
     width: 8%;
     border-radius: 999px;
     background: linear-gradient(90deg, #2563eb 0%, #38bdf8 100%);
-    transition: width 180ms ease-out, background 180ms ease-out;
+    transition: width 80ms linear, background 120ms ease-out;
   }
   .fill.done {
     background: linear-gradient(90deg, #059669 0%, #34d399 100%);
@@ -333,7 +335,8 @@ function buildProgressWindowHtml() {
 
     function applyState(data) {
       if (!data) return;
-      const pct = Math.max(0, Math.min(100, Math.round(Number(data.percent || 0))));
+      const rawPct = Number(data.percent);
+      const pct = Math.max(0, Math.min(100, Math.round(Number.isFinite(rawPct) ? rawPct : 0)));
       const status = data.status || 'active';
 
       stageEl.textContent = data.stage || 'Procesando...';
@@ -343,7 +346,7 @@ function buildProgressWindowHtml() {
       if (data.detail) {
         detailEl.textContent = data.detail;
       } else if (data.currentPage && data.totalPages) {
-        detailEl.textContent = 'Elemento ' + data.currentPage + ' de ' + data.totalPages;
+        detailEl.textContent = 'Página ' + data.currentPage + ' de ' + data.totalPages;
       } else if (data.fileCount) {
         detailEl.textContent = data.fileCount + ' archivo(s) en proceso local';
       }
@@ -478,18 +481,31 @@ function parseCliArgs(argv) {
   };
 }
 
-function closeProgressWindow() {
+function closeProgressWindow(suppressQuit = false) {
   if (progressWindow && !progressWindow.isDestroyed()) {
+    if (suppressQuit) {
+      suppressProgressWindowQuit = true;
+    }
     progressWindow.close();
   }
   progressWindow = null;
+  progressWindowReady = false;
 }
 
 function updateProgressWindow(payload) {
-  lastProgressPayload = {
+  const nextPayload = {
     ...lastProgressPayload,
     ...payload,
   };
+  if (
+    payload &&
+    !Object.prototype.hasOwnProperty.call(payload, 'detail') &&
+    payload.currentPage &&
+    payload.totalPages
+  ) {
+    nextPayload.detail = `Página ${payload.currentPage} de ${payload.totalPages}`;
+  }
+  lastProgressPayload = nextPayload;
   if (!progressWindow || progressWindow.isDestroyed()) return;
   const pct = Math.max(0, Math.min(100, Number(lastProgressPayload.percent || 0)));
   if (lastProgressPayload.status === 'error') {
@@ -504,7 +520,14 @@ function updateProgressWindow(payload) {
   } else {
     progressWindow.setProgressBar(pct > 0 ? pct / 100 : -1);
   }
-  progressWindow.webContents.send('speedpdf:progress-ui', lastProgressPayload);
+  if (progressWindowReady && !progressWindow.webContents.isLoading()) {
+    progressWindow.webContents.send('speedpdf:progress-ui', lastProgressPayload);
+    try {
+      progressWindow.webContents.invalidate();
+    } catch {
+      // ignore invalidate error
+    }
+  }
 }
 
 function createProgressWindow(initialState) {
@@ -517,10 +540,19 @@ function createProgressWindow(initialState) {
   if (progressWindow && !progressWindow.isDestroyed()) {
     updateProgressWindow(lastProgressPayload);
     if (!progressWindow.isVisible()) progressWindow.show();
+    progressWindow.moveTop();
+    try {
+      progressWindow.webContents.setBackgroundThrottling(false);
+      progressWindow.webContents.invalidate();
+    } catch {
+      // ignore
+    }
     progressWindow.focus();
     return;
   }
 
+  suppressProgressWindowQuit = false;
+  progressWindowReady = false;
   progressWindow = new BrowserWindow({
     width: 460,
     height: 186,
@@ -538,18 +570,31 @@ function createProgressWindow(initialState) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      backgroundThrottling: false,
+      paintWhenInitiallyHidden: true,
     },
   });
 
   progressWindow.loadURL('app://speedpdf/__progress.html');
 
   progressWindow.webContents.on('did-finish-load', () => {
+    progressWindowReady = true;
+    try {
+      if (progressWindow && !progressWindow.isDestroyed()) {
+        progressWindow.webContents.setBackgroundThrottling(false);
+      }
+    } catch {
+      // ignore
+    }
     updateProgressWindow(lastProgressPayload);
   });
 
   progressWindow.on('closed', () => {
+    const suppressQuit = suppressProgressWindowQuit;
+    suppressProgressWindowQuit = false;
     progressWindow = null;
-    if (launchedHeadlessForCli && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
+    progressWindowReady = false;
+    if (!suppressQuit && launchedHeadlessForCli && (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isVisible())) {
       app.quit();
     }
   });
@@ -1625,166 +1670,233 @@ ipcMain.handle(
       sendProgress('installing', 100, 'Iniciando instalación y reiniciando SPEED.PDF...');
 
       const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
-      const scriptPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.cmd`);
-      let cmdLines;
+      const isPortableUpdate = Boolean(portableExe && /portable/i.test(safeName));
+      const relaunchExe = portableExe || process.execPath;
+      const currentAppDir = path.dirname(relaunchExe);
 
-      if (portableExe && /portable/i.test(safeName)) {
-        const targetDir = path.dirname(portableExe);
-        const nextPortablePath = path.join(targetDir, safeName);
-        cmdLines = [
-          '@echo off',
-          'chcp 65001 >nul',
-          'title Actualizando SPEED.PDF Portable',
-          `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
-          `set "SRC=${sanitizeBatchValue(downloadPath)}"`,
-          `set "DST=${sanitizeBatchValue(nextPortablePath)}"`,
-          `set "OLD=${sanitizeBatchValue(portableExe)}"`,
-          `set "TARGET_PID=${process.pid}"`,
-          'call :log "Iniciando actualizacion Portable hacia %DST%"',
-          'ping 127.0.0.1 -n 3 >nul',
-          'taskkill /F /PID %TARGET_PID% >nul 2>&1',
-          'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
-          'ping 127.0.0.1 -n 2 >nul',
-          'set "COPIED=0"',
-          'for /L %%N in (1,1,12) do (',
-          '  copy /Y "%SRC%" "%DST%" >nul 2>&1',
-          '  if not errorlevel 1 (',
-          '    set "COPIED=1"',
-          '    goto :after_copy',
-          '  )',
-          '  ping 127.0.0.1 -n 2 >nul',
-          ')',
-          ':after_copy',
-          'if "%COPIED%"=="1" if exist "%DST%" (',
-          '  call :log "Portable actualizado en %DST%"',
-          '  del "%SRC%" >nul 2>&1',
-          '  if /I not "%DST%"=="%OLD%" if exist "%OLD%" del "%OLD%" >nul 2>&1',
-          '  start "" "%DST%"',
-          '  goto :cleanup',
-          ')',
-          'call :log "No se pudo reemplazar el Portable; ejecutando descarga directamente: %SRC%"',
-          'start "" "%SRC%"',
-          'goto :cleanup',
-          ':log',
-          'for %%I in ("%LOG_PATH%") do if not exist "%%~dpI" mkdir "%%~dpI" >nul 2>&1',
-          'echo [%DATE% %TIME%] %~1>> "%LOG_PATH%" 2>nul',
-          'goto :eof',
-          ':cleanup',
-          '(goto) 2>nul & del "%~f0"',
-        ];
-      } else {
-        const relaunchExe = portableExe || process.execPath;
-        const currentAppDir = path.dirname(relaunchExe);
-        cmdLines = [
-          '@echo off',
-          'chcp 65001 >nul',
-          'title Actualizando SPEED.PDF',
-          `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
-          `set "INST=${sanitizeBatchValue(downloadPath)}"`,
-          `set "INST_NAME=${sanitizeBatchValue(safeName)}"`,
-          `set "APP_EXE=${sanitizeBatchValue(relaunchExe)}"`,
-          `set "APP_DIR=${sanitizeBatchValue(currentAppDir)}"`,
-          `set "EXPECTED_VER=${sanitizeBatchValue(cleanExpectedVer)}"`,
-          `set "TARGET_PID=${process.pid}"`,
-          'call :log "Iniciando actualizacion hacia %INST_NAME% (esperada: %EXPECTED_VER%)"',
-          'echo Cerrando SPEED.PDF para instalar la nueva version...',
-          'ping 127.0.0.1 -n 3 >nul',
-          'taskkill /F /PID %TARGET_PID% >nul 2>&1',
-          'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
-          'ping 127.0.0.1 -n 2 >nul',
-          'call :log "Lanzando instalador silencioso..."',
-          'if not exist "%APP_EXE%" goto :run_silent_default',
-          'start "Instalador SPEED.PDF" /WAIT "%INST%" /S /D=%APP_DIR%',
-          'goto :after_silent_run',
-          ':run_silent_default',
-          'start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
-          ':after_silent_run',
-          'set "INST_EXIT=%ERRORLEVEL%"',
-          'call :log "Instalador silencioso finalizo con ExitCode=%INST_EXIT%"',
-          'set /a WAIT_TRIES=0',
-          ':wait_inst_loop',
-          'tasklist /FO CSV /NH /FI "IMAGENAME eq %INST_NAME%" 2>nul | find /I "%INST_NAME%" >nul',
-          'if errorlevel 1 goto :after_wait_inst',
-          'if %WAIT_TRIES% GEQ 30 goto :after_wait_inst',
-          'set /a WAIT_TRIES+=1',
-          'ping 127.0.0.1 -n 2 >nul',
-          'goto :wait_inst_loop',
-          ':after_wait_inst',
-          'set "UPDATED_EXE="',
-          'if "%EXPECTED_VER%"=="" goto :check_exit_only',
-          'call :check_ver "%APP_EXE%"',
-          'if defined UPDATED_EXE goto :launch_updated',
-          'call :check_ver "%ProgramFiles%\\SPEED.PDF\\SPEED.PDF.exe"',
-          'if defined UPDATED_EXE goto :launch_updated',
-          'call :check_ver "%ProgramFiles(x86)%\\SPEED.PDF\\SPEED.PDF.exe"',
-          'if defined UPDATED_EXE goto :launch_updated',
-          'call :check_ver "%LOCALAPPDATA%\\Programs\\SPEED.PDF\\SPEED.PDF.exe"',
-          'if defined UPDATED_EXE goto :launch_updated',
-          'goto :fallback_visual',
-          ':check_exit_only',
-          'if "%INST_EXIT%"=="0" if exist "%APP_EXE%" set "UPDATED_EXE=%APP_EXE%"',
-          'if defined UPDATED_EXE goto :launch_updated',
-          ':fallback_visual',
-          'call :log "No se confirmo instalacion silenciosa; abriendo asistente visual: %INST%"',
-          'start "" "%INST%"',
-          'goto :cleanup',
-          ':launch_updated',
-          'call :log "Actualizacion verificada. Iniciando %UPDATED_EXE%"',
-          'del "%INST%" >nul 2>&1',
-          'start "" "%UPDATED_EXE%"',
-          'goto :cleanup',
-          ':check_ver',
-          'set "CAND=%~1"',
-          'if "%CAND%"=="" goto :eof',
-          'if not exist "%CAND%" goto :eof',
-          'for %%I in ("%CAND%") do set "CAND_DIR=%%~dpI"',
-          'set "PKG=%CAND_DIR%resources\\app\\package.json"',
-          'if not exist "%PKG%" goto :eof',
-          'findstr /C:"\\"version\\": \\"%EXPECTED_VER%\\"" "%PKG%" >nul 2>&1',
-          'if not errorlevel 1 (',
-          '  set "UPDATED_EXE=%CAND%"',
-          '  goto :eof',
-          ')',
-          'findstr /C:"\\"version\\":\\"%EXPECTED_VER%\\"" "%PKG%" >nul 2>&1',
-          'if not errorlevel 1 set "UPDATED_EXE=%CAND%"',
-          'goto :eof',
-          ':log',
-          'for %%I in ("%LOG_PATH%") do if not exist "%%~dpI" mkdir "%%~dpI" >nul 2>&1',
-          'echo [%DATE% %TIME%] %~1>> "%LOG_PATH%" 2>nul',
-          'goto :eof',
-          ':cleanup',
-          '(goto) 2>nul & del "%~f0"',
-        ];
-      }
+      const psEscape = (val) => String(val || '').replace(/'/g, "''");
 
-      // Importante: los archivos .cmd NO deben llevar BOM UTF-8
-      await fsp.writeFile(scriptPath, `${cmdLines.join('\r\n')}\r\n`, 'utf8');
+      const psScript = isPortableUpdate
+        ? [
+            `$ErrorActionPreference = 'Continue'`,
+            `$logPath = '${psEscape(updaterLogPath)}'`,
+            `$src = '${psEscape(downloadPath)}'`,
+            `$dst = '${psEscape(path.join(path.dirname(portableExe), safeName))}'`,
+            `$old = '${psEscape(portableExe)}'`,
+            `$targetPid = ${Number(process.pid) || 0}`,
+            `function Write-UpdLog([string]$msg) { try { $d = Split-Path -Parent $logPath; if ($d -and !(Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "] " + $msg) -Encoding UTF8 } catch {} }`,
+            `Write-UpdLog "Iniciando actualizacion Portable hacia $dst"`,
+            `$sw = [Diagnostics.Stopwatch]::StartNew()`,
+            `while ($sw.Elapsed.TotalSeconds -lt 6) {`,
+            `  $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue`,
+            `  if (-not $p) { break }`,
+            `  if ($sw.Elapsed.TotalSeconds -ge 1.8) { Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue }`,
+            `  Start-Sleep -Milliseconds 300`,
+            `}`,
+            `Start-Sleep -Milliseconds 600`,
+            `$copied = $false`,
+            `for ($i = 0; $i -lt 15; $i++) {`,
+            `  try { Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; $copied = $true; break } catch { Start-Sleep -Milliseconds 800 }`,
+            `}`,
+            `if ($copied -and (Test-Path -LiteralPath $dst)) {`,
+            `  Write-UpdLog "Portable actualizado en $dst"`,
+            `  Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue`,
+            `  if (($dst -ine $old) -and (Test-Path -LiteralPath $old)) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }`,
+            `  Start-Process -FilePath $dst`,
+            `} else {`,
+            `  Write-UpdLog "No se pudo reemplazar el Portable; ejecutando descarga directamente: $src"`,
+            `  Start-Process -FilePath $src`,
+            `}`,
+          ].join('\r\n')
+        : [
+            `$ErrorActionPreference = 'Continue'`,
+            `$logPath = '${psEscape(updaterLogPath)}'`,
+            `$inst = '${psEscape(downloadPath)}'`,
+            `$instBase = '${psEscape(path.basename(safeName, path.extname(safeName)))}'`,
+            `$appExe = '${psEscape(relaunchExe)}'`,
+            `$appDir = '${psEscape(currentAppDir)}'`,
+            `$expectedVer = '${psEscape(cleanExpectedVer)}'`,
+            `$targetPid = ${Number(process.pid) || 0}`,
+            `function Write-UpdLog([string]$msg) { try { $d = Split-Path -Parent $logPath; if ($d -and !(Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "] " + $msg) -Encoding UTF8 } catch {} }`,
+            `function Test-VerMatch([string]$cand, [string]$ver) {`,
+            `  if (-not $cand -or -not (Test-Path -LiteralPath $cand)) { return $false }`,
+            `  if (-not $ver) { return $true }`,
+            `  try {`,
+            `    $dir = Split-Path -Parent $cand`,
+            `    $pkg = Join-Path $dir 'resources\\app\\package.json'`,
+            `    if (Test-Path -LiteralPath $pkg) {`,
+            `      $raw = [IO.File]::ReadAllText($pkg)`,
+            `      $m = [regex]::Match($raw, '"version"\\s*:\\s*"([^"]+)"')`,
+            `      if ($m.Success -and $m.Groups[1].Value.TrimStart('v') -eq $ver) { return $true }`,
+            `    }`,
+            `    $fv = [Diagnostics.FileVersionInfo]::GetVersionInfo($cand).ProductVersion`,
+            `    if ($fv -and $fv.TrimStart('v').StartsWith($ver)) { return $true }`,
+            `  } catch {}`,
+            `  return $false`,
+            `}`,
+            `Write-UpdLog "Iniciando actualizacion hacia $inst (esperada: $expectedVer)"`,
+            `$sw = [Diagnostics.Stopwatch]::StartNew()`,
+            `while ($sw.Elapsed.TotalSeconds -lt 8) {`,
+            `  $alive = Get-Process -Id $targetPid -ErrorAction SilentlyContinue`,
+            `  $sameApp = Get-Process -Name 'SPEED.PDF' -ErrorAction SilentlyContinue`,
+            `  if (-not $alive -and -not $sameApp) { break }`,
+            `  if ($sw.Elapsed.TotalSeconds -ge 1.8) {`,
+            `    if ($alive) { $alive | Stop-Process -Force -ErrorAction SilentlyContinue }`,
+            `    if ($sameApp) { $sameApp | Stop-Process -Force -ErrorAction SilentlyContinue }`,
+            `  }`,
+            `  Start-Sleep -Milliseconds 350`,
+            `}`,
+            `Start-Sleep -Milliseconds 700`,
+            `$nsisArgs = if ($appDir -and (Test-Path -LiteralPath $appExe)) { "/S /D=$appDir" } else { "/S" }`,
+            `Write-UpdLog "Ejecutando instalador silencioso: $inst $nsisArgs"`,
+            `$exitCode = -1`,
+            `try {`,
+            `  $proc = Start-Process -FilePath $inst -ArgumentList $nsisArgs -Wait -PassThru -ErrorAction Stop`,
+            `  if ($null -ne $proc) { $exitCode = $proc.ExitCode }`,
+            `} catch {`,
+            `  Write-UpdLog ("Error al iniciar instalador silencioso: " + $_.Exception.Message)`,
+            `}`,
+            `Write-UpdLog "Instalador silencioso finalizo con ExitCode=$exitCode"`,
+            `$w = 0`,
+            `while ($w -lt 30) {`,
+            `  $runningInst = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq $instBase }`,
+            `  if (-not $runningInst) { break }`,
+            `  $w++`,
+            `  Start-Sleep -Milliseconds 800`,
+            `}`,
+            `$candidates = @($appExe, "$env:ProgramFiles\\SPEED.PDF\\SPEED.PDF.exe", "\${env:ProgramFiles(x86)}\\SPEED.PDF\\SPEED.PDF.exe", "$env:LOCALAPPDATA\\Programs\\SPEED.PDF\\SPEED.PDF.exe") | Where-Object { $_ } | Select-Object -Unique`,
+            `$updatedExe = $null`,
+            `if ($expectedVer) {`,
+            `  foreach ($c in $candidates) { if (Test-VerMatch $c $expectedVer) { $updatedExe = $c; break } }`,
+            `} elseif ($exitCode -eq 0 -and (Test-Path -LiteralPath $appExe)) {`,
+            `  $updatedExe = $appExe`,
+            `}`,
+            `if ($updatedExe) {`,
+            `  Write-UpdLog "Actualizacion verificada. Iniciando $updatedExe"`,
+            `  Remove-Item -LiteralPath $inst -Force -ErrorAction SilentlyContinue`,
+            `  Start-Process -FilePath $updatedExe`,
+            `} else {`,
+            `  Write-UpdLog "No se confirmo instalacion silenciosa; abriendo asistente visual: $inst"`,
+            `  Start-Process -FilePath $inst`,
+            `}`,
+          ].join('\r\n');
 
       const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
-      const cmdCandidate = path.join(systemRoot, 'System32', 'cmd.exe');
-      const cmdExe = fs.existsSync(cmdCandidate) ? cmdCandidate : 'cmd.exe';
+      const psCandidate = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+      const psExe = fs.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
 
-      await new Promise((resolve, reject) => {
-        let settled = false;
-        const child = spawn(
-          cmdExe,
-          ['/d', '/c', 'start', 'Actualizando SPEED.PDF', '/MIN', scriptPath],
-          { detached: true, windowsHide: true, stdio: 'ignore' }
-        );
+      let launched = false;
+      if (fs.existsSync(psCandidate)) {
+        try {
+          const encodedPs = Buffer.from(psScript, 'utf16le').toString('base64');
+          await new Promise((resolve, reject) => {
+            let settled = false;
+            const child = spawn(
+              psExe,
+              ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodedPs],
+              { detached: true, windowsHide: true, stdio: 'ignore' }
+            );
+            child.once('error', (spawnErr) => {
+              if (settled) return;
+              settled = true;
+              reject(spawnErr);
+            });
+            child.once('spawn', () => {
+              if (settled) return;
+              settled = true;
+              child.unref();
+              resolve();
+            });
+          });
+          launched = true;
+        } catch (psErr) {
+          appendCrashLog('install-update-ps-fallback', psErr);
+        }
+      }
 
-        child.once('error', (spawnErr) => {
-          if (settled) return;
-          settled = true;
-          reject(spawnErr);
+      if (!launched) {
+        const scriptPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.cmd`);
+        const cmdLines = isPortableUpdate
+          ? [
+              '@echo off',
+              'chcp 65001 >nul',
+              `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
+              `set "SRC=${sanitizeBatchValue(downloadPath)}"`,
+              `set "DST=${sanitizeBatchValue(path.join(path.dirname(portableExe), safeName))}"`,
+              `set "OLD=${sanitizeBatchValue(portableExe)}"`,
+              `set "TARGET_PID=${process.pid}"`,
+              'ping 127.0.0.1 -n 3 >nul',
+              'taskkill /F /PID %TARGET_PID% >nul 2>&1',
+              'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
+              'ping 127.0.0.1 -n 2 >nul',
+              'copy /Y "%SRC%" "%DST%" >nul 2>&1',
+              'if exist "%DST%" (',
+              '  del "%SRC%" >nul 2>&1',
+              '  if /I not "%DST%"=="%OLD%" if exist "%OLD%" del "%OLD%" >nul 2>&1',
+              '  start "" "%DST%"',
+              ') else (',
+              '  start "" "%SRC%"',
+              ')',
+              '(goto) 2>nul & del "%~f0"',
+            ]
+          : [
+              '@echo off',
+              'chcp 65001 >nul',
+              `set "INST=${sanitizeBatchValue(downloadPath)}"`,
+              `set "APP_EXE=${sanitizeBatchValue(relaunchExe)}"`,
+              `set "APP_DIR=${sanitizeBatchValue(currentAppDir)}"`,
+              `set "TARGET_PID=${process.pid}"`,
+              'ping 127.0.0.1 -n 3 >nul',
+              'taskkill /F /PID %TARGET_PID% >nul 2>&1',
+              'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
+              'ping 127.0.0.1 -n 2 >nul',
+              'if exist "%APP_EXE%" (',
+              '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S /D=%APP_DIR%',
+              ') else (',
+              '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
+              ')',
+              'if errorlevel 1 (',
+              '  start "" "%INST%"',
+              ') else if exist "%APP_EXE%" (',
+              '  del "%INST%" >nul 2>&1',
+              '  start "" "%APP_EXE%"',
+              ') else (',
+              '  start "" "%INST%"',
+              ')',
+              '(goto) 2>nul & del "%~f0"',
+            ];
+
+        await fsp.writeFile(scriptPath, `${cmdLines.join('\r\n')}\r\n`, 'utf8');
+        const cmdCandidate = path.join(systemRoot, 'System32', 'cmd.exe');
+        const cmdExe = fs.existsSync(cmdCandidate) ? cmdCandidate : 'cmd.exe';
+
+        await new Promise((resolve, reject) => {
+          let settled = false;
+          const child = spawn(
+            cmdExe,
+            ['/d', '/c', `""${scriptPath}""`],
+            {
+              detached: true,
+              windowsHide: true,
+              windowsVerbatimArguments: true,
+              stdio: 'ignore',
+            }
+          );
+
+          child.once('error', (spawnErr) => {
+            if (settled) return;
+            settled = true;
+            reject(spawnErr);
+          });
+
+          child.once('spawn', () => {
+            if (settled) return;
+            settled = true;
+            child.unref();
+            resolve();
+          });
         });
-
-        child.once('spawn', () => {
-          if (settled) return;
-          settled = true;
-          child.unref();
-          resolve();
-        });
-      });
+      }
 
       app.releaseSingleInstanceLock();
       setTimeout(() => {
@@ -1792,7 +1904,10 @@ ipcMain.handle(
           mainWindow.close();
         }
         app.quit();
-      }, 450);
+      }, 300);
+      setTimeout(() => {
+        app.exit(0);
+      }, 1500);
 
       return { started: true };
     } catch (err) {
@@ -2110,8 +2225,13 @@ ipcMain.handle('speedpdf:submit-unlock-prompt', (_event, result) => {
     unlockPromptWindow.close();
   }
   unlockPromptWindow = null;
-  if (launchedHeadlessForCli && progressWindow && !progressWindow.isDestroyed()) {
-    progressWindow.show();
+  if (launchedHeadlessForCli) {
+    createProgressWindow({
+      percent: 12,
+      stage: 'Desprotegiendo documento PDF...',
+      detail: 'Preparando páginas del documento...',
+      status: 'active',
+    });
   }
   if (resolver) {
     resolver(result || { cancelled: true });
@@ -2144,9 +2264,7 @@ ipcMain.handle('speedpdf:prompt-unlock-passwords', async (_event, params) => {
     unlockPromptWindow = null;
   }
 
-  if (progressWindow && !progressWindow.isDestroyed()) {
-    progressWindow.hide();
-  }
+  closeProgressWindow(true);
 
   pendingUnlockPromptData = { files, errorMessage };
 
@@ -2428,8 +2546,13 @@ ipcMain.handle('speedpdf:submit-protect-prompt', (_event, result) => {
     protectPromptWindow.close();
   }
   protectPromptWindow = null;
-  if (launchedHeadlessForCli && progressWindow && !progressWindow.isDestroyed()) {
-    progressWindow.show();
+  if (launchedHeadlessForCli) {
+    createProgressWindow({
+      percent: 12,
+      stage: 'Protegiendo documento PDF...',
+      detail: 'Aplicando cifrado y permisos...',
+      status: 'active',
+    });
   }
   if (resolver) {
     resolver(result || { cancelled: true });
@@ -2461,9 +2584,7 @@ ipcMain.handle('speedpdf:prompt-protect-pdf', async (_event, params) => {
     protectPromptWindow = null;
   }
 
-  if (progressWindow && !progressWindow.isDestroyed()) {
-    progressWindow.hide();
-  }
+  closeProgressWindow(true);
 
   pendingProtectPromptData = { files };
 

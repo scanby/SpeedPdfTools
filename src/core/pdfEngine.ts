@@ -44,19 +44,69 @@ function clearMetadata(pdfDoc: PDFDocument): void {
   pdfDoc.setCreator('SPEED.PDF');
 }
 
+function dataUrlToBlob(dataUrl: string, fallbackMime: string): Blob {
+  const commaIdx = dataUrl.indexOf(',');
+  if (commaIdx < 0) {
+    throw new Error('No se pudo codificar el lienzo de página.');
+  }
+  const meta = dataUrl.slice(0, commaIdx);
+  const mimeMatch = meta.match(/data:([^;]+)/i);
+  const mime = mimeMatch ? mimeMatch[1] : fallbackMime;
+  const base64 = dataUrl.slice(commaIdx + 1);
+  const binStr = atob(base64);
+  const bytes = new Uint8Array(binStr.length);
+  for (let i = 0; i < binStr.length; i++) {
+    bytes[i] = binStr.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: mime });
+}
+
 function canvasToBlob(canvas: HTMLCanvasElement, mimeType: string, quality?: number): Promise<Blob> {
   return new Promise((resolve, reject) => {
-    canvas.toBlob(
-      (blob) => {
-        if (!blob) {
-          reject(new Error('No se pudo codificar el lienzo de página.'));
-          return;
-        }
-        resolve(blob);
-      },
-      mimeType,
-      quality
-    );
+    let settled = false;
+    const fallbackTimer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      try {
+        resolve(dataUrlToBlob(canvas.toDataURL(mimeType, quality), mimeType));
+      } catch (err) {
+        reject(
+          err instanceof Error
+            ? err
+            : new Error('Tiempo de espera agotado al codificar el lienzo de página.')
+        );
+      }
+    }, 6000);
+
+    try {
+      canvas.toBlob(
+        (blob) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(fallbackTimer);
+          if (blob) {
+            resolve(blob);
+            return;
+          }
+          try {
+            resolve(dataUrlToBlob(canvas.toDataURL(mimeType, quality), mimeType));
+          } catch {
+            reject(new Error('No se pudo codificar el lienzo de página.'));
+          }
+        },
+        mimeType,
+        quality
+      );
+    } catch (err) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(fallbackTimer);
+      try {
+        resolve(dataUrlToBlob(canvas.toDataURL(mimeType, quality), mimeType));
+      } catch {
+        reject(err instanceof Error ? err : new Error('No se pudo codificar el lienzo de página.'));
+      }
+    }
   });
 }
 
@@ -145,14 +195,18 @@ export async function rebuildCleanPdfViaPdfJs(
   const totalPages = srcPdf.numPages;
 
   try {
+    const prefix = options.stagePrefix || 'Normalizando página';
     for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
-      options.onProgress?.({
-        active: true,
-        percent: Math.round(((pageNum - 1) / Math.max(1, totalPages)) * 75) + 10,
-        stage: `${options.stagePrefix || 'Normalizando página'} ${pageNum} de ${totalPages}...`,
-        currentPage: pageNum,
-        totalPages,
-      });
+      if (pageNum === 1) {
+        options.onProgress?.({
+          active: true,
+          percent: 12,
+          stage: `${prefix} 1 de ${totalPages}...`,
+          currentPage: 1,
+          totalPages,
+        });
+        await yieldToMain(12);
+      }
 
       const page = await srcPdf.getPage(pageNum);
       const { baseViewport, renderViewport } = computeClampedRenderViewport(page, dpi, rotNorm);
@@ -178,13 +232,30 @@ export async function rebuildCleanPdfViaPdfJs(
         height: pageH,
       });
 
-      await yieldToMain();
+      const donePct = Math.round((pageNum / Math.max(1, totalPages)) * 76) + 12;
+      options.onProgress?.({
+        active: true,
+        percent: donePct,
+        stage:
+          pageNum < totalPages
+            ? `${prefix} ${pageNum + 1} de ${totalPages}...`
+            : `Páginas procesadas (${totalPages} de ${totalPages}). Finalizando...`,
+        currentPage: pageNum < totalPages ? pageNum + 1 : totalPages,
+        totalPages,
+      });
+
+      await yieldToMain(12);
     }
 
     return outDoc;
   } finally {
-    await srcPdf.cleanup();
-    await loadingTask.destroy();
+    await Promise.race([
+      Promise.allSettled([
+        srcPdf.cleanup().catch(() => {}),
+        loadingTask.destroy().catch(() => {}),
+      ]),
+      new Promise((resolve) => setTimeout(resolve, 1500)),
+    ]);
   }
 }
 
@@ -315,7 +386,7 @@ export async function unlockPdf(
 
   onProgress({
     active: true,
-    percent: 10,
+    percent: 12,
     stage: `Analizando cifrado y restricciones de ${file.name}...`,
   });
 
@@ -338,17 +409,28 @@ export async function unlockPdf(
 
     onProgress({
       active: true,
-      percent: 55,
-      stage: 'Generando copia limpia sin restricciones...',
-      currentPage: totalPages,
+      percent: 25,
+      stage: `Copiando ${totalPages} página(s) sin restricciones...`,
+      currentPage: 1,
       totalPages,
     });
 
     try {
       const copied = await outDoc.copyPages(parsedUnencryptedDoc, indices);
-      for (const p of copied) {
+      for (let i = 0; i < copied.length; i++) {
+        const p = copied[i];
         applyPdfPageRotation(p, rotNorm);
         outDoc.addPage(p);
+        if (i === copied.length - 1 || i % 3 === 0) {
+          onProgress({
+            active: true,
+            percent: Math.round(((i + 1) / Math.max(1, totalPages)) * 62) + 25,
+            stage: `Desprotegiendo página ${i + 1} de ${totalPages}...`,
+            currentPage: i + 1,
+            totalPages,
+          });
+          await yieldToMain(8);
+        }
       }
     } catch {
       outDoc = await rebuildCleanPdfViaPdfJs(sourceBytes, {

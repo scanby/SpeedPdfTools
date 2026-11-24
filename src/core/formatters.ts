@@ -147,8 +147,8 @@ export function triggerSequentialDownloads(
   });
 }
 
-export function yieldToMain(): Promise<void> {
+export function yieldToMain(delayMs = 0): Promise<void> {
   return new Promise((resolve) => {
-    setTimeout(resolve, 0);
+    setTimeout(resolve, delayMs);
   });
 }
