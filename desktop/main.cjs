@@ -1643,7 +1643,7 @@ ipcMain.handle(
       const existing = await fsp.readdir(updatesDir);
       await Promise.all(
         existing
-          .filter((name) => /\.(exe|cmd|bat)$/i.test(name))
+          .filter((name) => /\.(exe|cmd|bat|ps1|vbs|flag)$/i.test(name))
           .map((name) => fsp.unlink(path.join(updatesDir, name)).catch(() => {}))
       );
     } catch {
@@ -1652,6 +1652,18 @@ ipcMain.handle(
 
     const downloadPath = path.join(updatesDir, safeName);
     const updaterLogPath = path.join(app.getPath('userData'), 'speedpdf-updater.log');
+    const handshakeFlagPath = path.join(updatesDir, `updater_started_${Date.now()}.flag`);
+
+    const waitForHandshakeFlag = async (timeoutMs) => {
+      const started = Date.now();
+      while (Date.now() - started < timeoutMs) {
+        if (fs.existsSync(handshakeFlagPath)) {
+          return true;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      return fs.existsSync(handshakeFlagPath);
+    };
 
     try {
       sendProgress('downloading', 2, `Descargando ${safeName}...`);
@@ -1667,36 +1679,42 @@ ipcMain.handle(
 
       await verifyDownloadedExecutable(downloadPath);
 
-      sendProgress('installing', 100, 'Iniciando instalación y reiniciando SPEED.PDF...');
+      sendProgress('installing', 100, 'Preparando instalador de actualización...');
 
       const portableExe = process.env.PORTABLE_EXECUTABLE_FILE;
       const isPortableUpdate = Boolean(portableExe && /portable/i.test(safeName));
-      const relaunchExe = portableExe || process.execPath;
-      const currentAppDir = path.dirname(relaunchExe);
+      const isPackagedInstalled = Boolean(app.isPackaged && !portableExe);
+      const relaunchExe = portableExe || (app.isPackaged ? process.execPath : '');
+      const currentAppDir = relaunchExe ? path.dirname(relaunchExe) : '';
 
       const psEscape = (val) => String(val || '').replace(/'/g, "''");
+      const psPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.ps1`);
+      const cmdPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.cmd`);
 
       const psScript = isPortableUpdate
         ? [
             `$ErrorActionPreference = 'Continue'`,
+            `$flagPath = '${psEscape(handshakeFlagPath)}'`,
             `$logPath = '${psEscape(updaterLogPath)}'`,
             `$src = '${psEscape(downloadPath)}'`,
             `$dst = '${psEscape(path.join(path.dirname(portableExe), safeName))}'`,
             `$old = '${psEscape(portableExe)}'`,
+            `$selfPs = '${psEscape(psPath)}'`,
             `$targetPid = ${Number(process.pid) || 0}`,
+            `try { [IO.File]::WriteAllText($flagPath, 'OK') } catch {}`,
             `function Write-UpdLog([string]$msg) { try { $d = Split-Path -Parent $logPath; if ($d -and !(Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "] " + $msg) -Encoding UTF8 } catch {} }`,
             `Write-UpdLog "Iniciando actualizacion Portable hacia $dst"`,
             `$sw = [Diagnostics.Stopwatch]::StartNew()`,
             `while ($sw.Elapsed.TotalSeconds -lt 6) {`,
             `  $p = Get-Process -Id $targetPid -ErrorAction SilentlyContinue`,
             `  if (-not $p) { break }`,
-            `  if ($sw.Elapsed.TotalSeconds -ge 1.8) { Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue }`,
-            `  Start-Sleep -Milliseconds 300`,
+            `  if ($sw.Elapsed.TotalSeconds -ge 1.4) { Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue }`,
+            `  Start-Sleep -Milliseconds 250`,
             `}`,
             `Start-Sleep -Milliseconds 600`,
             `$copied = $false`,
             `for ($i = 0; $i -lt 15; $i++) {`,
-            `  try { Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; $copied = $true; break } catch { Start-Sleep -Milliseconds 800 }`,
+            `  try { Copy-Item -LiteralPath $src -Destination $dst -Force -ErrorAction Stop; $copied = $true; break } catch { Start-Sleep -Milliseconds 700 }`,
             `}`,
             `if ($copied -and (Test-Path -LiteralPath $dst)) {`,
             `  Write-UpdLog "Portable actualizado en $dst"`,
@@ -1707,16 +1725,21 @@ ipcMain.handle(
             `  Write-UpdLog "No se pudo reemplazar el Portable; ejecutando descarga directamente: $src"`,
             `  Start-Process -FilePath $src`,
             `}`,
+            `Remove-Item -LiteralPath $flagPath -Force -ErrorAction SilentlyContinue`,
+            `Remove-Item -LiteralPath $selfPs -Force -ErrorAction SilentlyContinue`,
           ].join('\r\n')
         : [
             `$ErrorActionPreference = 'Continue'`,
+            `$flagPath = '${psEscape(handshakeFlagPath)}'`,
             `$logPath = '${psEscape(updaterLogPath)}'`,
             `$inst = '${psEscape(downloadPath)}'`,
             `$instBase = '${psEscape(path.basename(safeName, path.extname(safeName)))}'`,
-            `$appExe = '${psEscape(relaunchExe)}'`,
-            `$appDir = '${psEscape(currentAppDir)}'`,
+            `$appExe = '${psEscape(isPackagedInstalled ? relaunchExe : '')}'`,
+            `$appDir = '${psEscape(isPackagedInstalled ? currentAppDir : '')}'`,
             `$expectedVer = '${psEscape(cleanExpectedVer)}'`,
+            `$selfPs = '${psEscape(psPath)}'`,
             `$targetPid = ${Number(process.pid) || 0}`,
+            `try { [IO.File]::WriteAllText($flagPath, 'OK') } catch {}`,
             `function Write-UpdLog([string]$msg) { try { $d = Split-Path -Parent $logPath; if ($d -and !(Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }; Add-Content -LiteralPath $logPath -Value ("[" + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + "] " + $msg) -Encoding UTF8 } catch {} }`,
             `function Test-VerMatch([string]$cand, [string]$ver) {`,
             `  if (-not $cand -or -not (Test-Path -LiteralPath $cand)) { return $false }`,
@@ -1734,24 +1757,36 @@ ipcMain.handle(
             `  } catch {}`,
             `  return $false`,
             `}`,
-            `Write-UpdLog "Iniciando actualizacion hacia $inst (esperada: $expectedVer)"`,
+            `Write-UpdLog "Iniciando actualizacion hacia $inst (esperada: $expectedVer, appDir: $appDir)"`,
             `$sw = [Diagnostics.Stopwatch]::StartNew()`,
             `while ($sw.Elapsed.TotalSeconds -lt 8) {`,
             `  $alive = Get-Process -Id $targetPid -ErrorAction SilentlyContinue`,
             `  $sameApp = Get-Process -Name 'SPEED.PDF' -ErrorAction SilentlyContinue`,
             `  if (-not $alive -and -not $sameApp) { break }`,
-            `  if ($sw.Elapsed.TotalSeconds -ge 1.8) {`,
+            `  if ($sw.Elapsed.TotalSeconds -ge 1.4) {`,
             `    if ($alive) { $alive | Stop-Process -Force -ErrorAction SilentlyContinue }`,
             `    if ($sameApp) { $sameApp | Stop-Process -Force -ErrorAction SilentlyContinue }`,
             `  }`,
-            `  Start-Sleep -Milliseconds 350`,
+            `  Start-Sleep -Milliseconds 300`,
             `}`,
-            `Start-Sleep -Milliseconds 700`,
-            `$nsisArgs = if ($appDir -and (Test-Path -LiteralPath $appExe)) { "/S /D=$appDir" } else { "/S" }`,
+            `Start-Sleep -Milliseconds 800`,
+            `$nsisArgs = if ($appDir -and $appExe -and (Test-Path -LiteralPath $appExe)) { "/S /D=$appDir" } else { "/S" }`,
             `Write-UpdLog "Ejecutando instalador silencioso: $inst $nsisArgs"`,
             `$exitCode = -1`,
+            `$needsAdmin = $false`,
+            `if ($appDir) {`,
+            `  if (($env:ProgramFiles -and $appDir.StartsWith($env:ProgramFiles, [StringComparison]::OrdinalIgnoreCase)) -or (\${env:ProgramFiles(x86)} -and $appDir.StartsWith(\${env:ProgramFiles(x86)}, [StringComparison]::OrdinalIgnoreCase))) {`,
+            `    $needsAdmin = $true`,
+            `  }`,
+            `}`,
+            `$isAdmin = $false`,
+            `try { $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) } catch {}`,
             `try {`,
-            `  $proc = Start-Process -FilePath $inst -ArgumentList $nsisArgs -Wait -PassThru -ErrorAction Stop`,
+            `  if ($needsAdmin -and -not $isAdmin) {`,
+            `    $proc = Start-Process -FilePath $inst -ArgumentList $nsisArgs -Verb RunAs -Wait -PassThru -ErrorAction Stop`,
+            `  } else {`,
+            `    $proc = Start-Process -FilePath $inst -ArgumentList $nsisArgs -Wait -PassThru -ErrorAction Stop`,
+            `  }`,
             `  if ($null -ne $proc) { $exitCode = $proc.ExitCode }`,
             `} catch {`,
             `  Write-UpdLog ("Error al iniciar instalador silencioso: " + $_.Exception.Message)`,
@@ -1768,7 +1803,7 @@ ipcMain.handle(
             `$updatedExe = $null`,
             `if ($expectedVer) {`,
             `  foreach ($c in $candidates) { if (Test-VerMatch $c $expectedVer) { $updatedExe = $c; break } }`,
-            `} elseif ($exitCode -eq 0 -and (Test-Path -LiteralPath $appExe)) {`,
+            `} elseif ($exitCode -eq 0 -and $appExe -and (Test-Path -LiteralPath $appExe)) {`,
             `  $updatedExe = $appExe`,
             `}`,
             `if ($updatedExe) {`,
@@ -1779,21 +1814,23 @@ ipcMain.handle(
             `  Write-UpdLog "No se confirmo instalacion silenciosa; abriendo asistente visual: $inst"`,
             `  Start-Process -FilePath $inst`,
             `}`,
+            `Remove-Item -LiteralPath $flagPath -Force -ErrorAction SilentlyContinue`,
+            `Remove-Item -LiteralPath $selfPs -Force -ErrorAction SilentlyContinue`,
           ].join('\r\n');
 
       const systemRoot = process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows';
       const psCandidate = path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
       const psExe = fs.existsSync(psCandidate) ? psCandidate : 'powershell.exe';
 
-      let launched = false;
+      let verifiedLaunched = false;
       if (fs.existsSync(psCandidate)) {
         try {
-          const encodedPs = Buffer.from(psScript, 'utf16le').toString('base64');
+          await fsp.writeFile(psPath, `\uFEFF${psScript}\r\n`, 'utf8');
           await new Promise((resolve, reject) => {
             let settled = false;
             const child = spawn(
               psExe,
-              ['-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-EncodedCommand', encodedPs],
+              ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', psPath],
               { detached: true, windowsHide: true, stdio: 'ignore' }
             );
             child.once('error', (spawnErr) => {
@@ -1808,18 +1845,22 @@ ipcMain.handle(
               resolve();
             });
           });
-          launched = true;
+          verifiedLaunched = await waitForHandshakeFlag(2500);
+          if (!verifiedLaunched) {
+            appendCrashLog('install-update-ps-no-handshake', 'PowerShell did not signal startup within 2.5s');
+          }
         } catch (psErr) {
           appendCrashLog('install-update-ps-fallback', psErr);
         }
       }
 
-      if (!launched) {
-        const scriptPath = path.join(updatesDir, `speedpdf_update_${Date.now()}.cmd`);
+      if (!verifiedLaunched) {
         const cmdLines = isPortableUpdate
           ? [
               '@echo off',
               'chcp 65001 >nul',
+              `set "FLAG_PATH=${sanitizeBatchValue(handshakeFlagPath)}"`,
+              `echo OK>"%FLAG_PATH%"`,
               `set "LOG_PATH=${sanitizeBatchValue(updaterLogPath)}"`,
               `set "SRC=${sanitizeBatchValue(downloadPath)}"`,
               `set "DST=${sanitizeBatchValue(path.join(path.dirname(portableExe), safeName))}"`,
@@ -1837,67 +1878,92 @@ ipcMain.handle(
               ') else (',
               '  start "" "%SRC%"',
               ')',
+              'del "%FLAG_PATH%" >nul 2>&1',
               '(goto) 2>nul & del "%~f0"',
             ]
           : [
               '@echo off',
               'chcp 65001 >nul',
+              `set "FLAG_PATH=${sanitizeBatchValue(handshakeFlagPath)}"`,
+              `echo OK>"%FLAG_PATH%"`,
               `set "INST=${sanitizeBatchValue(downloadPath)}"`,
-              `set "APP_EXE=${sanitizeBatchValue(relaunchExe)}"`,
-              `set "APP_DIR=${sanitizeBatchValue(currentAppDir)}"`,
+              `set "APP_EXE=${sanitizeBatchValue(isPackagedInstalled ? relaunchExe : '')}"`,
+              `set "APP_DIR=${sanitizeBatchValue(isPackagedInstalled ? currentAppDir : '')}"`,
               `set "TARGET_PID=${process.pid}"`,
               'ping 127.0.0.1 -n 3 >nul',
               'taskkill /F /PID %TARGET_PID% >nul 2>&1',
               'taskkill /F /IM "SPEED.PDF.exe" >nul 2>&1',
               'ping 127.0.0.1 -n 2 >nul',
-              'if exist "%APP_EXE%" (',
-              '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S /D=%APP_DIR%',
-              ') else (',
-              '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
-              ')',
-              'if errorlevel 1 (',
-              '  start "" "%INST%"',
-              ') else if exist "%APP_EXE%" (',
-              '  del "%INST%" >nul 2>&1',
-              '  start "" "%APP_EXE%"',
-              ') else (',
-              '  start "" "%INST%"',
-              ')',
+              ...(isPackagedInstalled && relaunchExe && currentAppDir
+                ? [
+                    'if exist "%APP_EXE%" (',
+                    '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S /D=%APP_DIR%',
+                    ') else (',
+                    '  start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
+                    ')',
+                    'if errorlevel 1 (',
+                    '  start "" "%INST%"',
+                    ') else if exist "%APP_EXE%" (',
+                    '  del "%INST%" >nul 2>&1',
+                    '  start "" "%APP_EXE%"',
+                    ') else (',
+                    '  start "" "%INST%"',
+                    ')',
+                  ]
+                : [
+                    'start "Instalador SPEED.PDF" /WAIT "%INST%" /S',
+                    'if errorlevel 1 start "" "%INST%"',
+                  ]),
+              'del "%FLAG_PATH%" >nul 2>&1',
               '(goto) 2>nul & del "%~f0"',
             ];
 
-        await fsp.writeFile(scriptPath, `${cmdLines.join('\r\n')}\r\n`, 'utf8');
+        await fsp.writeFile(cmdPath, `${cmdLines.join('\r\n')}\r\n`, 'utf8');
         const cmdCandidate = path.join(systemRoot, 'System32', 'cmd.exe');
         const cmdExe = fs.existsSync(cmdCandidate) ? cmdCandidate : 'cmd.exe';
 
-        await new Promise((resolve, reject) => {
-          let settled = false;
-          const child = spawn(
-            cmdExe,
-            ['/d', '/c', `""${scriptPath}""`],
-            {
-              detached: true,
-              windowsHide: true,
-              windowsVerbatimArguments: true,
-              stdio: 'ignore',
-            }
-          );
+        try {
+          await new Promise((resolve, reject) => {
+            let settled = false;
+            const child = spawn(
+              cmdExe,
+              ['/d', '/c', `""${cmdPath}""`],
+              {
+                detached: true,
+                windowsHide: true,
+                windowsVerbatimArguments: true,
+                stdio: 'ignore',
+              }
+            );
 
-          child.once('error', (spawnErr) => {
-            if (settled) return;
-            settled = true;
-            reject(spawnErr);
-          });
+            child.once('error', (spawnErr) => {
+              if (settled) return;
+              settled = true;
+              reject(spawnErr);
+            });
 
-          child.once('spawn', () => {
-            if (settled) return;
-            settled = true;
-            child.unref();
-            resolve();
+            child.once('spawn', () => {
+              if (settled) return;
+              settled = true;
+              child.unref();
+              resolve();
+            });
           });
-        });
+          verifiedLaunched = await waitForHandshakeFlag(2000);
+        } catch (cmdErr) {
+          appendCrashLog('install-update-cmd-fallback', cmdErr);
+        }
       }
 
+      if (!verifiedLaunched) {
+        appendCrashLog('install-update-shell-open', `Fallback shell.openPath(${downloadPath})`);
+        const openErr = await shell.openPath(downloadPath);
+        if (openErr) {
+          throw new Error(`No se pudo iniciar el instalador descargado (${openErr}).`);
+        }
+      }
+
+      sendProgress('installing', 100, 'Instalación iniciada. Reiniciando SPEED.PDF...');
       app.releaseSingleInstanceLock();
       setTimeout(() => {
         if (mainWindow && !mainWindow.isDestroyed()) {
